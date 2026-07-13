@@ -7,12 +7,14 @@ import {
   getPendingItems,
   getAllFacts,
   getConfig,
+  setConfig,
   getAllMoveEvents,
 } from "./db.js";
 import { getStalOpenIssues } from "./maintenance.js";
 import { getEventsWithin } from "./calendar.js";
 import { shouldSuggestDailyReorder, suggestReorder, markSuggestedItems } from "./reorder.js";
 import { popDueScheduledNags } from "./scheduled.js";
+import { categorySpikeReport, formatSpike } from "./analytics.js";
 
 export interface NagMessage {
   target: string | "group";
@@ -22,7 +24,8 @@ export interface NagMessage {
 }
 
 export async function checkNags(now: Date = new Date()): Promise<NagMessage[]> {
-  const [members, balances, openGroceries, ledger, pendingItems, facts, lastRun, moveEventsList] =
+  const spikeNagKey = `last_spending_spike_nag_${now.toISOString().slice(0, 7)}`;
+  const [members, balances, openGroceries, ledger, pendingItems, facts, lastRun, moveEventsList, lastSpikeNag] =
     await Promise.all([
       getMembers(),
       getAllBalances(),
@@ -32,6 +35,7 @@ export async function checkNags(now: Date = new Date()): Promise<NagMessage[]> {
       getAllFacts(),
       getConfig("last_grocery_run"),
       getAllMoveEvents(),
+      getConfig(spikeNagKey),
     ]);
 
   const nags: NagMessage[] = [];
@@ -212,6 +216,19 @@ export async function checkNags(now: Date = new Date()): Promise<NagMessage[]> {
   const due = await popDueScheduledNags(now);
   for (const n of due) {
     nags.push({ target: n.target, message: n.message, priority: n.priority });
+  }
+
+  // ── Rule 11: Spending spike alert (Hydra analytics fallback) ─────────────
+  if (!lastSpikeNag) {
+    const spike = await categorySpikeReport(now);
+    if (spike) {
+      nags.push({
+        target: "group",
+        message: `${formatSpike(spike)}. worth checking before it becomes the new normal.`,
+        priority: "low",
+      });
+      await setConfig(spikeNagKey, now.toISOString());
+    }
   }
 
   // ── Rule 9: Move event stall check (F5) ──────────────────────────────────

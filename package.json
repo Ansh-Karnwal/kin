@@ -5,11 +5,12 @@
   "workspaces": [
     "packages/bridge",
     "packages/agent",
-    "packages/slack-bridge"
+    "packages/slack-bridge",
+    "packages/gtm-agent"
   ],
   "scripts": {
-    "dev": "concurrently --names bridge,agent,slack --prefix-colors blue,green,magenta \"npm run dev -w packages/bridge\" \"npm run dev -w packages/agent\" \"npm run dev -w packages/slack-bridge\"",
-    "build": "npm run build -w packages/bridge && npm run build -w packages/agent && npm run build -w packages/slack-bridge"
+    "dev": "concurrently --names bridge,agent,slack,gtm --prefix-colors blue,green,magenta,cyan \"npm run dev -w packages/bridge\" \"npm run dev -w packages/agent\" \"npm run dev -w packages/slack-bridge\" \"npm run dev -w packages/gtm-agent\"",
+    "build": "npm run build -w packages/bridge && npm run build -w packages/agent && npm run build -w packages/slack-bridge && npm run build -w packages/gtm-agent"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

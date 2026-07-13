@@ -25,6 +25,7 @@ import { parseReceipt } from "./vision.js";
 import { callVendor } from "./vendor.js";
 import { webSearch } from "./search.js";
 import { getPrices } from "./nimble.js";
+import { spendingReport } from "./analytics.js";
 import { addScheduledNag } from "./scheduled.js";
 import { log } from "./log.js";
 
@@ -80,6 +81,18 @@ const functionDeclarations: FunctionDeclaration[] = [
     name: "get_balances",
     description: "Return current balances for all household members. Use when someone asks who owes what.",
     parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "spending_report",
+    description:
+      "Return a spending intelligence report from ledger analytics. Use when someone asks for spending breakdowns, category burn, per-roommate spend, monthly trends, or whether costs are up.",
+    parameters: {
+      type: "object",
+      properties: {
+        since: { type: "string", description: "ISO date/time to start from; defaults to the start of this month" },
+        group_by: { type: "string", enum: ["category", "member", "month"], description: "primary grouping for the summary" },
+      },
+    },
   },
 
   // Grocery
@@ -487,6 +500,21 @@ export function createDispatch(ctx: ToolContext) {
           })
           .join(", ");
         return { balances: result, summary };
+      }
+
+      case "spending_report": {
+        const groupBy =
+          args.group_by === "member" || args.group_by === "month" || args.group_by === "category"
+            ? args.group_by
+            : "category";
+        const report = await spendingReport({
+          since: args.since ? String(args.since) : undefined,
+          groupBy,
+        });
+        return {
+          ...report,
+          ack: report.summary,
+        };
       }
 
       // ── Grocery ─────────────────────────────────────────────────────────────

@@ -8,6 +8,8 @@ import { money } from "./state.js";
 import { log } from "./log.js";
 import { checkNags } from "./nag.js";
 import { toolDeclarations, createDispatch } from "./tools.js";
+import { getPriceTrend, type PriceTrend } from "./nimble.js";
+import { generateText, MAIN_MODEL } from "./llm.js";
 import { checkResolution, resolveItems, buildResolutionAck } from "./pending.js";
 import {
   getActiveJobForChat,
@@ -61,6 +63,59 @@ app.use(express.json({ limit: "10mb" }));
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "hearth-agent" });
+});
+
+// ── GTM employee endpoints ──────────────────────────────────────────────────
+
+app.get("/gtm/trend", async (req, res) => {
+  const product = typeof req.query.product === "string" && req.query.product.trim()
+    ? req.query.product.trim()
+    : "eggs";
+  try {
+    const trend = await getPriceTrend(product);
+    res.json(trend);
+  } catch (err) {
+    log("gtm.trend_error", { product, error: String(err) });
+    res.status(500).json({ error: "trend unavailable" });
+  }
+});
+
+function isPriceTrend(value: unknown): value is PriceTrend {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.product === "string" &&
+    typeof v.changePct === "number" &&
+    typeof v.period === "string" &&
+    typeof v.note === "string"
+  );
+}
+
+function fallbackGtmPost(trend: PriceTrend): string {
+  const dir = trend.changePct >= 0 ? "up" : "down";
+  const pct = Math.abs(trend.changePct).toFixed(1).replace(/\.0$/, "");
+  return `${trend.product} prices are ${dir} ${pct}% ${trend.period}. kin spots that stuff before the group chat turns into a spreadsheet.`;
+}
+
+app.post("/gtm/draft", async (req, res) => {
+  const trend = (req.body as { trend?: unknown }).trend;
+  if (!isPriceTrend(trend)) {
+    res.status(400).json({ error: "expected { trend: { product, changePct, period, note } }" });
+    return;
+  }
+
+  try {
+    const post = await generateText({
+      model: MAIN_MODEL,
+      systemInstruction:
+        "You are Kin's GTM AI marketing employee. Draft one punchy X post for Kin, a household-operations agent in a group chat. Keep it under 240 characters, concrete, lowercase, and do not use hashtags unless one is genuinely useful.",
+      prompt: `Price trend from Nimble: ${JSON.stringify(trend)}\n\nDraft a social post that turns this live price trend into a reason to try Kin. Mention Kin by name.`,
+    });
+    res.json({ post: post || fallbackGtmPost(trend) });
+  } catch (err) {
+    log("gtm.draft_fallback", { error: String(err) });
+    res.json({ post: fallbackGtmPost(trend) });
+  }
 });
 
 // ── /chat ─────────────────────────────────────────────────────────────────────
