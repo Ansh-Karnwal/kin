@@ -2,3 +2,5 @@ node_modules/
 dist/
 .env
 *.db
+packages/bridge/.last-seen
+packages/bridge/handles.json
