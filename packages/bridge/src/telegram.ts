@@ -136,6 +136,22 @@ export function sendMessageWithKeyboard(
 }
 
 /**
+ * Strip the inline keyboard from a sent message. Our keyboards are one-shot
+ * approvals — removing them on first press prevents double-actions
+ * (e.g. cancelling an already-placed order).
+ */
+export function removeInlineKeyboard(
+  chatId: number | string,
+  messageId: number
+): Promise<TgMessage | boolean> {
+  return call<TgMessage | boolean>("editMessageReplyMarkup", {
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: { inline_keyboard: [] },
+  });
+}
+
+/**
  * Must be called within 3 seconds of receiving a callback_query or Telegram
  * will show a generic error on the button. Answer with "" for a silent ack.
  */

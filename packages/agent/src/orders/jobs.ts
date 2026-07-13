@@ -4,6 +4,7 @@ import {
   addOrderJob,
   patchOrderJob,
   getGroceryItems,
+  fulfillGroceryItem,
   getMembers,
   getAllBalances,
   adjustBalance,
@@ -92,6 +93,15 @@ export async function applyOrderToLedger(
     split: members,
     timestamp: new Date().toISOString(),
   });
+
+  // Ordered items come off the open list — otherwise they resurrect in the next cart.
+  const openItems = await getGroceryItems(true);
+  const orderedNames = new Set(job.items.map((i) => i.name.toLowerCase()));
+  await Promise.all(
+    openItems
+      .filter((g) => orderedNames.has(g.item.toLowerCase()))
+      .map((g) => fulfillGroceryItem(g.id))
+  );
 
   await Promise.all([
     setConfig("last_grocery_run", new Date().toISOString()),

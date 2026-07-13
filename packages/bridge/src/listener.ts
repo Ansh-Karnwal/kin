@@ -5,6 +5,7 @@ import {
   getUpdates,
   sendMessage,
   answerCallbackQuery,
+  removeInlineKeyboard,
   downloadLargestPhoto,
   type TgMessage,
   type TgCallbackQuery,
@@ -182,6 +183,14 @@ async function handleCallbackQuery(query: TgCallbackQuery): Promise<void> {
 
   const handles = loadHandles();
   const sender = resolveSender(handles, String(from.id), from.first_name);
+
+  // One-shot buttons: strip the keyboard on first press so approve/cancel
+  // can't both fire on the same cart.
+  try {
+    await removeInlineKeyboard(chatId, message.message_id);
+  } catch (err) {
+    log("listener.remove_keyboard_failed", { chatId, error: String(err) });
+  }
 
   log("listener.callback", { sender, chatId, data });
   await forwardCallback(chatId, sender, queryId, data, from);

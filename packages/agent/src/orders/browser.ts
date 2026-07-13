@@ -313,6 +313,12 @@ export async function cancelOrder(jobId: string, bridgePort: number): Promise<vo
   const job = await getOrderJob(jobId);
   if (!job) return;
 
+  if (job.status === "done") {
+    await bridgeSend(job.chatId, "that order's already placed — can't cancel it from here", bridgePort);
+    return;
+  }
+  if (job.status === "cancelled" || job.status === "failed") return;
+
   await updateOrderJob(jobId, { status: "cancelled" });
 
   if (job.sessionId && !DRY_RUN) {
@@ -386,6 +392,10 @@ export async function editCart(
 // ── Dry-run simulation ────────────────────────────────────────────────────────
 
 async function handleDryRun(job: OrderJob, bridgePort: number): Promise<void> {
+  // A real cart takes time to build; posting instantly beats the model's own
+  // "building your cart" reply into the chat. Pause so messages land in order.
+  await new Promise((r) => setTimeout(r, Number(process.env.DEMO_CALL_MS ?? 6000) / 2));
+
   const fakeCart = job.items.map((i, idx) => ({
     name: i.name,
     quantity: 1,

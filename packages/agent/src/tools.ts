@@ -135,7 +135,11 @@ const functionDeclarations: FunctionDeclaration[] = [
     parameters: {
       type: "object",
       properties: {
-        note: { type: "string", description: "optional instruction, e.g. 'split evenly this time'" },
+        note: {
+          type: "string",
+          description:
+            "ONLY if the sender explicitly gave an instruction for this order, repeat it here in their words (a 'split evenly' note changes how the cost is divided). Omit entirely otherwise — never invent one.",
+        },
       },
     },
   },
