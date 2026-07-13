@@ -332,4 +332,4 @@ The goal is to keep responses useful in a real group chat without sounding like 
 
 ## License
 
-Add license information here.
+This project is licensed under the [MIT License](LICENSE).
