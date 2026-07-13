@@ -1,11 +1,11 @@
-# Hearth
+# Kin
 ## 🏆 First Place @ Agent Native Hackathon
 
 **A household operations agent that lives inside your group chat.**
 
-Hearth sits in a roommate or household group chat, understands what people are coordinating, and helps turn those messages into action: splitting expenses, managing groceries, tracking bills, calling vendors, reading receipts, and following up on unpaid balances.
+Kin sits in a roommate or household group chat, understands what people are coordinating, and helps turn those messages into action: splitting expenses, managing groceries, tracking bills, calling vendors, reading receipts, and following up on unpaid balances.
 
-Instead of asking one person to remember everything, Hearth becomes the shared household coordinator.
+Instead of asking one person to remember everything, Kin becomes the shared household coordinator.
 
 ---
 
@@ -13,15 +13,15 @@ Instead of asking one person to remember everything, Hearth becomes the shared h
 
 Most household apps are passive trackers. Someone still has to open an app, enter an expense, update a grocery list, or remind a roommate to pay them back.
 
-Hearth works differently. It lives where household coordination already happens: the group chat.
+Kin works differently. It lives where household coordination already happens: the group chat.
 
 For example:
 
 > “sink’s leaking and rent’s due friday”
 
-Hearth can use the household context it already knows — unit number, landlord, roommates, balances, and recurring bills — to log the maintenance issue, prepare or place a landlord call, schedule a repair window, and start the rent split.
+Kin can use the household context it already knows — unit number, landlord, roommates, balances, and recurring bills — to log the maintenance issue, prepare or place a landlord call, schedule a repair window, and start the rent split.
 
-The core idea is a persistent **household context graph**. Over time, Hearth builds memory around facts like:
+The core idea is a persistent **household context graph**. Over time, Kin builds memory around facts like:
 
 * `wifi_account → jake`
 * `maya_allergy → peanuts`
@@ -29,13 +29,13 @@ The core idea is a persistent **household context graph**. Over time, Hearth bui
 * `landlord → dave`
 * `rent_due → friday`
 
-That shared context lets Hearth behave less like a chatbot and more like a reliable housemate who understands how the household works.
+That shared context lets Kin behave less like a chatbot and more like a reliable housemate who understands how the household works.
 
 ---
 
 ## How it works
 
-Hearth is built around a hand-rolled tool-calling loop.
+Kin is built around a hand-rolled tool-calling loop.
 
 Each incoming message is passed to a model with access to household state and a set of tools. The model decides whether the message is relevant, which tools to call, whether to chain multiple actions together, and how to respond back in the group chat.
 
@@ -92,9 +92,9 @@ Telegram group ──► Bridge ──► Agent/tool loop ──► Tools ──
 
 ## Safety model
 
-Hearth does not spend money without approval.
+Kin does not spend money without approval.
 
-For actions such as bill payments or grocery orders, Hearth stops before checkout, posts a screenshot or summary in the chat, and waits for an explicit confirmation before proceeding.
+For actions such as bill payments or grocery orders, Kin stops before checkout, posts a screenshot or summary in the chat, and waits for an explicit confirmation before proceeding.
 
 Demo mode also simulates external actions safely, allowing the project to be shown end-to-end without placing real orders, making real payments, or calling live services.
 
@@ -115,7 +115,7 @@ Demo mode also simulates external actions safely, allowing the project to be sho
 ## Project structure
 
 ```text
-Hearth/
+Kin/
 ├── packages/
 │   ├── agent/
 │   │   └── src/
@@ -128,7 +128,7 @@ Hearth/
 │   │       ├── vision.ts       # Receipt parsing
 │   │       ├── vendor.ts       # Vendor call flows
 │   │       ├── search.ts       # Web search
-│   │       └── prompts.ts      # Hearth persona and tone rules
+│   │       └── prompts.ts      # Kin persona and tone rules
 │   ├── bridge/                 # Telegram Bot API bridge
 │   └── slack-bridge/           # Optional Slack frontend
 └── .env                        # Local secrets and configuration
@@ -153,15 +153,15 @@ Optional integrations:
 * Vapi
 * Perplexity
 
-Hearth can run without the optional integrations. When those services are not configured, it falls back to in-memory state or simulated actions where appropriate.
+Kin can run without the optional integrations. When those services are not configured, it falls back to in-memory state or simulated actions where appropriate.
 
 ---
 
 ## Installation
 
 ```bash
-git clone https://github.com/Ansh-Karnwal/Hearth.git
-cd Hearth
+git clone https://github.com/Ansh-Karnwal/Kin.git
+cd Kin
 npm install
 ```
 
@@ -232,7 +232,7 @@ npm run build
 Seed the household once:
 
 ```text
-hearth we're jake, maya, and sam
+kin we're jake, maya, and sam
 our unit is 4B, landlord is dave
 ```
 
@@ -245,7 +245,7 @@ do the grocery run
 
 Expected behavior:
 
-* Hearth compiles the grocery list
+* Kin compiles the grocery list
 * Builds a cart
 * Posts a summary or screenshot
 * Waits for approval
@@ -259,7 +259,7 @@ call a plumber about the leaking sink
 
 Expected behavior:
 
-* Hearth logs the maintenance issue
+* Kin logs the maintenance issue
 * Uses household context to brief the call
 * Starts or simulates the vendor call
 * Reports the result back to the group chat
@@ -274,7 +274,7 @@ split this
 
 Expected behavior:
 
-* Hearth reads the receipt
+* Kin reads the receipt
 * Extracts merchant and total
 * Logs the expense
 * Splits the cost across household members
@@ -290,7 +290,7 @@ who owes what
 
 ## Demo mode vs. live mode
 
-`DEMO_MODE=true` is the safest way to run Hearth during demos.
+`DEMO_MODE=true` is the safest way to run Kin during demos.
 
 In demo mode:
 
@@ -306,7 +306,7 @@ Set `DEMO_MODE=false` only after the relevant live integrations are configured a
 
 ## Tone
 
-Hearth responds like a helpful roommate: brief, casual, and direct.
+Kin responds like a helpful roommate: brief, casual, and direct.
 
 The tone rules live in:
 
@@ -320,7 +320,7 @@ The goal is to keep responses useful in a real group chat without sounding like 
 
 ## Sponsor integration map
 
-| Sponsor / platform      | How Hearth uses it                                                                           |
+| Sponsor / platform      | How Kin uses it                                                                           |
 | ----------------------- | -------------------------------------------------------------------------------------------- |
 | Nebius AI Studio        | Runs the classifier, orchestrator, graph extraction, and receipt vision models               |
 | Butterbase              | Stores durable household state, including balances, facts, grocery lists, and scheduled jobs |
