@@ -108,6 +108,37 @@ function memPatch<T>(table: string, id: string, body: unknown): T | null {
   return { ...t[idx] } as T;
 }
 
+function asNumber(value: unknown, fallback = 0): number {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function asArray<T>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return Array.isArray(parsed) ? (parsed as T[]) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function asRecord<T extends Record<string, unknown>>(value: unknown): T {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as T;
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as T) : ({} as T);
+    } catch {
+      return {} as T;
+    }
+  }
+  return {} as T;
+}
+
 // ── Low-level HTTP helpers ─────────────────────────────────────────────────────
 
 function hdrs() {
@@ -116,6 +147,12 @@ function hdrs() {
 
 function authHdr() {
   return { Authorization: `Bearer ${TOKEN}` };
+}
+
+async function readJson<T>(r: Response): Promise<T | null> {
+  if (r.status === 204) return null;
+  const text = await r.text();
+  return text ? (JSON.parse(text) as T) : null;
 }
 
 async function get<T>(table: string, qs?: Record<string, string>): Promise<T[]> {
@@ -135,6 +172,18 @@ async function getOne<T>(table: string, id: string): Promise<T | null> {
 
 async function post<T>(table: string, body: unknown): Promise<T> {
   if (USE_MEMORY) return memPost<T>(table, body);
+  if (USE_INSFORGE) {
+    const url = new URL(`${BASE}/${table}`);
+    url.searchParams.set("select", "*");
+    const r = await fetch(url.toString(), {
+      method: "POST",
+      headers: { ...hdrs(), Prefer: "return=representation" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`POST ${table} ${r.status}: ${await r.text()}`);
+    const data = await readJson<T[]>(r);
+    return (data?.[0] ?? (body as T));
+  }
   const r = await fetch(`${BASE}/${table}`, {
     method: "POST",
     headers: hdrs(),
@@ -148,6 +197,20 @@ async function patch<T>(table: string, id: string, body: unknown): Promise<T> {
   if (USE_MEMORY) {
     // Patch-if-exists, create-if-missing — callers always fetch the id first.
     return (memPatch<T>(table, id, body) ?? memPost<T>(table, { id, ...(body as Row) }));
+  }
+  if (USE_INSFORGE) {
+    const url = new URL(`${BASE}/${table}`);
+    url.searchParams.set("id", `eq.${id}`);
+    url.searchParams.set("select", "*");
+    const r = await fetch(url.toString(), {
+      method: "PATCH",
+      headers: { ...hdrs(), Prefer: "return=representation" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`PATCH ${table}/${id} ${r.status}: ${await r.text()}`);
+    const data = await readJson<T[]>(r);
+    if (!data?.[0]) throw new Error(`PATCH ${table}/${id}: row not found`);
+    return data[0];
   }
   const r = await fetch(`${BASE}/${table}/${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -165,6 +228,16 @@ async function del(table: string, id: string): Promise<void> {
     if (idx !== -1) t.splice(idx, 1);
     return;
   }
+  if (USE_INSFORGE) {
+    const url = new URL(`${BASE}/${table}`);
+    url.searchParams.set("id", `eq.${id}`);
+    const r = await fetch(url.toString(), {
+      method: "DELETE",
+      headers: authHdr(),
+    });
+    if (!r.ok && r.status !== 404) throw new Error(`DELETE ${table}/${id} ${r.status}: ${await r.text()}`);
+    return;
+  }
   const r = await fetch(`${BASE}/${table}/${encodeURIComponent(id)}`, {
     method: "DELETE",
     headers: authHdr(),
@@ -176,6 +249,11 @@ async function del(table: string, id: string): Promise<void> {
 async function upsert<T>(table: string, id: string, body: unknown): Promise<T> {
   if (USE_MEMORY) {
     return (memPatch<T>(table, id, body) ?? memPost<T>(table, { id, ...(body as Row) }));
+  }
+  if (USE_INSFORGE) {
+    const existing = await getOne<T>(table, id);
+    if (existing) return patch<T>(table, id, body);
+    return post<T>(table, { id, ...(body as Row) });
   }
   const r = await fetch(`${BASE}/${table}/${encodeURIComponent(id)}`, {
     method: "PATCH",
@@ -211,13 +289,14 @@ export async function uploadReceiptImage(
     const { bytes, mime } = decodeBase64Image(imageBase64);
     const ext = mime.split("/")[1]?.replace("jpeg", "jpg") ?? "jpg";
     const name = filename ?? `receipt-${crypto.randomUUID()}.${ext}`;
-    const url = `${INSFORGE_URL}${INSFORGE_STORAGE_PATH}/${encodeURIComponent(INSFORGE_BUCKET)}/objects`;
+    const key = `receipts/${name}`;
+    const url = `${INSFORGE_URL}${INSFORGE_STORAGE_PATH}/${encodeURIComponent(INSFORGE_BUCKET)}/objects/${encodeURIComponent(key)}`;
 
     const form = new FormData();
     form.append("file", new Blob([new Uint8Array(bytes)], { type: mime }), name);
 
     const r = await fetch(url, {
-      method: "POST",
+      method: "PUT",
       headers: authHdr(), // multipart boundary set automatically by fetch
       body: form,
     });
@@ -232,9 +311,11 @@ export async function uploadReceiptImage(
       data.url ??
       data.publicUrl ??
       data.public_url ??
-      `${url}/${encodeURIComponent(data.key ?? data.name ?? name)}`;
+      `${INSFORGE_URL}${INSFORGE_STORAGE_PATH}/${encodeURIComponent(INSFORGE_BUCKET)}/objects/${encodeURIComponent(
+        data.key ?? data.name ?? key
+      )}`;
 
-    log("storage.receipt_uploaded", { name, url: resolved });
+    log("storage.receipt_uploaded", { key: data.key ?? key, url: resolved });
     return resolved;
   } catch (err) {
     log("storage.receipt_upload_failed", { error: String(err) });
@@ -250,13 +331,13 @@ export async function getMembers(): Promise<string[]> {
 }
 
 export async function getAllBalances(): Promise<Record<string, number>> {
-  const rows = await get<{ name: string; balance: number }>("members");
-  return Object.fromEntries(rows.map((r) => [r.name, r.balance]));
+  const rows = await get<{ name: string; balance: unknown }>("members");
+  return Object.fromEntries(rows.map((r) => [r.name, asNumber(r.balance)]));
 }
 
 export async function getMemberBalance(name: string): Promise<number> {
-  const rows = await get<{ balance: number }>("members", { name: `eq.${name}` });
-  return rows[0]?.balance ?? 0;
+  const rows = await get<{ balance: unknown }>("members", { name: `eq.${name}` });
+  return asNumber(rows[0]?.balance);
 }
 
 /** Add members that don't exist yet; existing balances are untouched. */
@@ -278,9 +359,9 @@ export async function setBalance(name: string, balance: number): Promise<void> {
 }
 
 export async function adjustBalance(name: string, delta: number): Promise<void> {
-  const rows = await get<{ id: string; balance: number }>("members", { name: `eq.${name}` });
+  const rows = await get<{ id: string; balance: unknown }>("members", { name: `eq.${name}` });
   if (rows[0]?.id) {
-    await patch("members", rows[0].id, { balance: (rows[0].balance ?? 0) + delta });
+    await patch("members", rows[0].id, { balance: asNumber(rows[0].balance) + delta });
   } else {
     await post("members", { name, balance: delta });
   }
@@ -365,14 +446,14 @@ export async function deleteAllFulfilledGrocery(): Promise<void> {
 // ── Ledger entries ─────────────────────────────────────────────────────────────
 
 function toLedgerEntry(r: {
-  id: string; payer: string; amount: number; description: string; split: string[]; timestamp: string;
+  id: string; payer: string; amount: unknown; description: string; split: unknown; timestamp: string;
   receipt_url?: string | null;
 }): LedgerEntry {
   return {
     payer: r.payer,
-    amount: r.amount,
+    amount: asNumber(r.amount),
     description: r.description,
-    split: r.split,
+    split: asArray<string>(r.split),
     timestamp: r.timestamp,
     receiptUrl: r.receipt_url ?? undefined,
   };
@@ -381,7 +462,7 @@ function toLedgerEntry(r: {
 export async function getLedgerEntries(limit?: number): Promise<LedgerEntry[]> {
   const qs: Record<string, string> = { order: "timestamp.asc" };
   if (limit) qs.limit = String(limit);
-  const rows = await get<{ id: string; payer: string; amount: number; description: string; split: string[]; timestamp: string; receipt_url?: string | null }>(
+  const rows = await get<{ id: string; payer: string; amount: unknown; description: string; split: unknown; timestamp: string; receipt_url?: string | null }>(
     "ledger_entries",
     qs
   );
@@ -462,7 +543,7 @@ function toMaintenanceIssue(r: {
     landlordNotifiedAt: r.landlord_notified_at ?? undefined,
     scheduledFor: r.scheduled_for ?? undefined,
     vendor: r.vendor ?? undefined,
-    photoUrls: r.photo_urls ?? [],
+    photoUrls: asArray<string>(r.photo_urls),
   };
 }
 
@@ -525,7 +606,7 @@ function toHouseEvent(r: {
     durationMinutes: r.duration_minutes ?? undefined,
     allDay: r.all_day,
     createdBy: r.created_by,
-    affectsMembers: r.affects_members ?? [],
+    affectsMembers: asArray<string>(r.affects_members),
     eventType: r.event_type as HouseEvent["eventType"],
     notes: r.notes ?? undefined,
     createdAt: r.created_at,
@@ -558,16 +639,16 @@ export async function addHouseEvent(event: HouseEvent): Promise<void> {
 // ── Consumption patterns ───────────────────────────────────────────────────────
 
 function toConsumptionPattern(r: {
-  id: string; item_name: string; avg_days_between_orders: number | null;
-  last_ordered_at: string; times_ordered: number; typical_requesters: string[]; updated_at: string;
+  id: string; item_name: string; avg_days_between_orders: unknown;
+  last_ordered_at: string; times_ordered: unknown; typical_requesters: unknown; updated_at: string;
 }): ConsumptionPattern {
   return {
     id: r.id,
     itemName: r.item_name,
-    avgDaysBetweenOrders: r.avg_days_between_orders ?? undefined,
+    avgDaysBetweenOrders: r.avg_days_between_orders == null ? undefined : asNumber(r.avg_days_between_orders),
     lastOrderedAt: r.last_ordered_at,
-    timesOrdered: r.times_ordered,
-    typicalRequesters: r.typical_requesters ?? [],
+    timesOrdered: asNumber(r.times_ordered),
+    typicalRequesters: asArray<string>(r.typical_requesters),
     updatedAt: r.updated_at,
   };
 }
@@ -612,18 +693,18 @@ export async function upsertConsumptionPattern(pattern: ConsumptionPattern): Pro
 
 function toOrderJob(r: {
   id: string; chat_id: string; status: string;
-  items: Array<{ name: string; requestedBy: string }>;
-  session_id: string | null; cart: unknown; subtotal: number | null;
+  items: unknown;
+  session_id: string | null; cart: unknown; subtotal: unknown;
   note: string | null; created_at: string; updated_at: string;
 }): OrderJob {
   return {
     id: r.id,
     chatId: r.chat_id,
     status: r.status as OrderJob["status"],
-    items: (r.items ?? []) as Array<{ name: string; requestedBy: string }>,
+    items: asArray<{ name: string; requestedBy: string }>(r.items),
     sessionId: r.session_id ?? undefined,
-    cart: r.cart as OrderJob["cart"],
-    subtotal: r.subtotal ?? undefined,
+    cart: r.cart == null ? undefined : asArray<NonNullable<OrderJob["cart"]>[number]>(r.cart),
+    subtotal: r.subtotal == null ? undefined : asNumber(r.subtotal),
     note: r.note ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -668,11 +749,11 @@ export async function patchOrderJob(id: string, p: Partial<OrderJob>): Promise<v
 
 function toMoveEvent(r: {
   id: string; chat_id: string; type: string; member: string; phase: string;
-  target_date: string; deposit_amount: number | null;
-  deposit_deductions: MoveEvent["depositDeductions"];
-  shared_assets: MoveEvent["sharedAssets"];
-  utility_transfer_status: MoveEvent["utilityTransferStatus"];
-  final_balance: number | null; created_at: string; updated_at: string;
+  target_date: string; deposit_amount: unknown;
+  deposit_deductions: unknown;
+  shared_assets: unknown;
+  utility_transfer_status: unknown;
+  final_balance: unknown; created_at: string; updated_at: string;
 }): MoveEvent {
   return {
     id: r.id,
@@ -681,11 +762,11 @@ function toMoveEvent(r: {
     member: r.member,
     phase: r.phase as MoveEvent["phase"],
     targetDate: r.target_date,
-    depositAmount: r.deposit_amount ?? undefined,
-    depositDeductions: r.deposit_deductions ?? [],
-    sharedAssets: r.shared_assets ?? [],
-    utilityTransferStatus: r.utility_transfer_status ?? {},
-    finalBalance: r.final_balance ?? undefined,
+    depositAmount: r.deposit_amount == null ? undefined : asNumber(r.deposit_amount),
+    depositDeductions: asArray<MoveEvent["depositDeductions"][number]>(r.deposit_deductions),
+    sharedAssets: asArray<MoveEvent["sharedAssets"][number]>(r.shared_assets),
+    utilityTransferStatus: asRecord<MoveEvent["utilityTransferStatus"]>(r.utility_transfer_status),
+    finalBalance: r.final_balance == null ? undefined : asNumber(r.final_balance),
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -732,7 +813,7 @@ export async function patchMoveEvent(id: string, p: Partial<MoveEvent>): Promise
 
 function toUtilityAccount(r: {
   id: string; name: string; login_url: string; context_id: string;
-  account_holder: string; autopay_enabled: boolean; alert_threshold_pct: number; created_at: string;
+  account_holder: string; autopay_enabled: boolean; alert_threshold_pct: unknown; created_at: string;
 }): UtilityAccount {
   return {
     id: r.id,
@@ -741,7 +822,7 @@ function toUtilityAccount(r: {
     contextId: r.context_id,
     accountHolder: r.account_holder,
     autopayEnabled: r.autopay_enabled,
-    alertThresholdPct: r.alert_threshold_pct,
+    alertThresholdPct: asNumber(r.alert_threshold_pct, 15),
     createdAt: r.created_at,
   };
 }
@@ -771,13 +852,13 @@ export async function addUtilityAccount(account: UtilityAccount): Promise<void> 
 // ── Utility bills ──────────────────────────────────────────────────────────────
 
 function toUtilityBill(r: {
-  id: string; account_id: string; amount: number; due_date: string | null;
+  id: string; account_id: string; amount: unknown; due_date: string | null;
   period_start: string | null; period_end: string | null; status: string; fetched_at: string;
 }): UtilityBill {
   return {
     id: r.id,
     accountId: r.account_id,
-    amount: r.amount,
+    amount: asNumber(r.amount),
     dueDate: r.due_date ?? undefined,
     periodStart: r.period_start ?? undefined,
     periodEnd: r.period_end ?? undefined,
