@@ -1,10 +1,10 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { log } from "./log.js";
 
-/** Main agent model: free, fast, big context window for full-state injection. */
-export const MAIN_MODEL = "gemini-1.5-flash";
-/** Classifier/parser model: lighter on free-tier quota. */
-export const LITE_MODEL = "gemini-1.5-flash-8b";
+/** Main agent model: frontier reasoning for chat and state-aware responses. */
+export const MAIN_MODEL = "gemini-3.5-flash";
+/** Classifier/parser model: fast and cheap for JSON extraction tasks. */
+export const LITE_MODEL = "gemini-3.1-flash-lite";
 
 // Gemini free tier allows 15 RPM on Flash; keep one in reserve for safety.
 const MAX_REQUESTS_PER_MINUTE = 14;

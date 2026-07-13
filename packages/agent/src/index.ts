@@ -14,6 +14,14 @@ import {
   formatGroceryList,
   doGroceryRun,
 } from "./grocery.js";
+import {
+  parsePendingItem,
+  applyPendingItem,
+  buildPendingAck,
+  checkResolution,
+  resolveItems,
+  buildResolutionAck,
+} from "./pending.js";
 
 const PORT = Number(process.env.AGENT_PORT) || 3000;
 const BRIDGE_PORT = Number(process.env.BRIDGE_PORT) || 3001;
@@ -65,6 +73,17 @@ app.post("/chat", async (req, res) => {
       return;
     }
 
+    // Resolution check runs before classification so "i made the reservation"
+    // isn't killed by the irrelevance gate before we can match it to open items
+    const resolvedIds = await checkResolution(text, sender);
+    if (resolvedIds.length > 0) {
+      const resolved = resolveItems(resolvedIds, sender);
+      const reply = buildResolutionAck(resolved);
+      log("chat.outbound", { sender, type: "resolution", resolved: resolvedIds, reply });
+      res.json({ reply });
+      return;
+    }
+
     const classification = await classifyMessage(sender, text);
 
     // Confidently irrelevant → stay quiet; bridge sends nothing for null reply
@@ -99,6 +118,17 @@ app.post("/chat", async (req, res) => {
       // Couldn't extract a concrete intent — fall through to main model
     }
 
+    if (classification.type === "action_item" || classification.type === "other") {
+      const item = await parsePendingItem(text, sender);
+      if (item) {
+        applyPendingItem(item);
+        const reply = buildPendingAck(item);
+        log("chat.outbound", { sender, type: "action_item", reply });
+        res.json({ reply });
+        return;
+      }
+    }
+
     const reply = await generateText({
       model: MAIN_MODEL,
       systemInstruction: buildChatSystemPrompt(serializeState()),
@@ -116,11 +146,47 @@ app.post("/chat", async (req, res) => {
   }
 });
 
+app.post("/members", (req, res) => {
+  const { members } = req.body as { members?: unknown };
+  if (!Array.isArray(members) || !members.every((m) => typeof m === "string")) {
+    res.status(400).json({ error: "expected { members: string[] }" });
+    return;
+  }
+  state.members = members;
+  for (const m of members) {
+    if (state.balances[m] === undefined) state.balances[m] = 0;
+  }
+  log("state.members_set", { members });
+  res.json({ ok: true, members: state.members });
+});
+
 app.get("/balances", (_req, res) => {
   const result = Object.fromEntries(
     state.members.map((m) => [m, state.balances[m] ?? 0])
   );
   res.json(result);
+});
+
+app.post("/facts", (req, res) => {
+  const { key, value } = req.body as { key?: unknown; value?: unknown };
+  if (typeof key !== "string" || typeof value !== "string") {
+    res.status(400).json({ error: "expected { key: string, value: string }" });
+    return;
+  }
+  state.householdFacts[key] = value;
+  log("state.fact_set", { key, value });
+  res.json({ ok: true, facts: state.householdFacts });
+});
+
+app.delete("/facts/:key", (req, res) => {
+  const { key } = req.params;
+  delete state.householdFacts[key];
+  log("state.fact_deleted", { key });
+  res.json({ ok: true, facts: state.householdFacts });
+});
+
+app.get("/facts", (_req, res) => {
+  res.json(state.householdFacts);
 });
 
 app.get("/nag-check", (_req, res) => {

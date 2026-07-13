@@ -20,12 +20,24 @@ export interface Chore {
   done: boolean;
 }
 
+export interface PendingItem {
+  id: string;
+  description: string;
+  raisedBy: string;
+  raisedAt: string;
+  deadline?: string; // ISO timestamp if a time was mentioned
+  resolved: boolean;
+  resolvedAt?: string;
+  resolvedBy?: string;
+}
+
 export interface HouseholdState {
   members: string[];
   balances: Record<string, number>; // positive = is owed money
   groceryList: GroceryItem[];
   ledger: LedgerEntry[];
   chores: Chore[];
+  pendingItems: PendingItem[];
   householdFacts: Record<string, string>; // e.g. "lease_end" -> "August 2025"
   lastGroceryRun?: string; // ISO timestamp
 }
@@ -36,6 +48,7 @@ export const state: HouseholdState = {
   groceryList: [],
   ledger: [],
   chores: [],
+  pendingItems: [],
   householdFacts: {},
 };
 
@@ -94,6 +107,19 @@ export function serializeState(s: HouseholdState = state, now: Date = new Date()
           (e) =>
             `${e.payer} paid ${money(e.amount)} for ${e.description} (split: ${e.split.join(", ")})`
         )
+        .join("; ")}`
+    );
+  }
+
+  const openItems = s.pendingItems.filter((i) => !i.resolved);
+  if (openItems.length) {
+    lines.push(
+      `Open action items: ${openItems
+        .map((i) => {
+          const age = Math.floor((now.getTime() - Date.parse(i.raisedAt)) / 3_600_000);
+          const dl = i.deadline ? `, due ${i.deadline.slice(11, 16)}` : "";
+          return `"${i.description}" (${i.raisedBy}, ${age}h ago${dl})`;
+        })
         .join("; ")}`
     );
   }

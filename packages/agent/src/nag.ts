@@ -82,5 +82,34 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
     }
   }
 
+  // Rule 5: Unresolved action items
+  for (const item of s.pendingItems) {
+    if (item.resolved) continue;
+    const ageMs = now.getTime() - Date.parse(item.raisedAt);
+    const ageHours = ageMs / 3_600_000;
+
+    if (item.deadline) {
+      const msUntil = Date.parse(item.deadline) - now.getTime();
+      if (msUntil <= 2 * 3_600_000) {
+        // Within 2 hours of deadline (or past it)
+        const overdue = msUntil < 0;
+        nags.push({
+          target: "group",
+          message: overdue
+            ? `heads up — "${item.description}" was supposed to happen by now, anyone on it?`
+            : `heads up — still need someone to "${item.description}" (coming up soon)`,
+          priority: "high",
+        });
+      }
+    } else if (ageHours >= 6) {
+      // No deadline, stale for 6+ hours
+      nags.push({
+        target: "group",
+        message: `reminder — "${item.description}" (raised by ${item.raisedBy.toLowerCase()}) — anyone picked this up?`,
+        priority: "low",
+      });
+    }
+  }
+
   return nags;
 }

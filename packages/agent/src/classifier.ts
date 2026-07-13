@@ -3,7 +3,7 @@ import { JSON_ONLY, buildUtilitySystemPrompt } from "./prompts.js";
 import { serializeState } from "./state.js";
 import { log } from "./log.js";
 
-export type MessageType = "expense" | "grocery" | "chore" | "query" | "banter" | "other";
+export type MessageType = "expense" | "grocery" | "chore" | "action_item" | "query" | "banter" | "other";
 
 export interface Classification {
   relevant: boolean;
@@ -14,7 +14,7 @@ export interface Classification {
 /** Fail-open default when the classifier errors or returns junk. */
 const FAIL_OPEN: Classification = { relevant: true, type: "other", confidence: "low" };
 
-const VALID_TYPES: readonly string[] = ["expense", "grocery", "chore", "query", "banter", "other"];
+const VALID_TYPES: readonly string[] = ["expense", "grocery", "chore", "action_item", "query", "banter", "other"];
 
 function isClassification(value: unknown): value is Classification {
   if (typeof value !== "object" || value === null) return false;
@@ -39,6 +39,7 @@ Guidance:
 - "expense": someone paid for something shared, or money owed is being discussed ("venmo me", "i got the pizza, $42")
 - "grocery": adding/removing/asking about shopping list items ("we're out of oat milk", "got the paper towels")
 - "chore": assigning, completing, or discussing household tasks ("can someone take out the trash by friday")
+- "action_item": something that needs doing but isn't assigned yet ("we should make a reservation", "someone needs to get toilet paper", "we should call the landlord")
 - "query": a direct question for hearth about household state ("who owes what?", "what's on the list?")
 - "banter": social chatter not aimed at hearth
 - "relevant": false only when hearth clearly has nothing to do or say here (pure banter between humans)
