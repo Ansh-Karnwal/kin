@@ -19,26 +19,14 @@ export interface WebSearchResult {
 /** You.com endpoint families. Callers can request one; default comes from env. */
 export type SearchMode = "web" | "news" | "research" | "deep";
 
-const YOU_BASE = "https://api.ydc-index.io";
+// You.com v1 API. Search is GET on ydc-index.io with X-API-KEY; research is
+// POST on api.you.com with Bearer auth. v1 has no separate news endpoint.
+const YOU_SEARCH_URL = "https://ydc-index.io/v1/search";
+const YOU_RESEARCH_URL = "https://api.you.com/v1/research";
 
 function defaultMode(): SearchMode {
   const m = (process.env.YOU_SEARCH_ENDPOINT ?? "web").toLowerCase();
   return m === "news" || m === "research" || m === "deep" ? m : "web";
-}
-
-function youEndpoint(mode: SearchMode): string {
-  switch (mode) {
-    case "news":
-      return `${YOU_BASE}/news`;
-    case "research":
-    case "deep":
-      // You.com's research/deep-research endpoint returns a synthesized answer
-      // plus citations; both modes map here.
-      return `${YOU_BASE}/research`;
-    case "web":
-    default:
-      return `${YOU_BASE}/search`;
-  }
 }
 
 /** Recursively collect http(s) URLs from any `url`/`link`/`source` fields. */
@@ -61,18 +49,25 @@ function collectUrls(node: unknown, out: Set<string>): void {
 
 /** Build a readable text blob from whichever fields You.com returned. */
 function extractYouText(data: Record<string, unknown>): string {
-  // Research/smart endpoints return a synthesized answer directly.
+  // Research returns { output: { content } }; other synthesized shapes use flat keys.
+  const output = data.output as Record<string, unknown> | undefined;
+  if (typeof output?.content === "string" && output.content.trim()) {
+    return output.content.trim();
+  }
   for (const key of ["answer", "summary", "text", "response"]) {
     const v = data[key];
     if (typeof v === "string" && v.trim()) return v.trim();
   }
 
-  // Web/news endpoints return result arrays — stitch title + snippet/description.
+  // Search returns { results: { web: [...] } }; older shapes used hits/results arrays.
   const buckets: unknown[] = [];
-  const hits = data.hits ?? data.results;
-  if (Array.isArray(hits)) buckets.push(...hits);
-  const news = (data.news as Record<string, unknown> | undefined)?.results;
-  if (Array.isArray(news)) buckets.push(...news);
+  const results = data.results;
+  if (Array.isArray(results)) buckets.push(...results);
+  else if (typeof results === "object" && results != null) {
+    const web = (results as Record<string, unknown>).web;
+    if (Array.isArray(web)) buckets.push(...web);
+  }
+  if (Array.isArray(data.hits)) buckets.push(...(data.hits as unknown[]));
 
   const lines: string[] = [];
   for (const h of buckets.slice(0, 6)) {
@@ -94,11 +89,26 @@ async function youSearch(query: string, mode: SearchMode): Promise<WebSearchResu
   const key = process.env.YOU_API_KEY;
   if (!key) return null;
   try {
-    const url = new URL(youEndpoint(mode));
-    url.searchParams.set("query", query);
-    const res = await fetch(url.toString(), {
-      headers: { "X-API-Key": key, Accept: "application/json" },
-    });
+    let res: Response;
+    if (mode === "research" || mode === "deep") {
+      res = await fetch(YOU_RESEARCH_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({ input: query }),
+      });
+    } else {
+      // "news" maps here too — v1 has no separate news endpoint.
+      const url = new URL(YOU_SEARCH_URL);
+      url.searchParams.set("query", query);
+      url.searchParams.set("count", "10");
+      res = await fetch(url.toString(), {
+        headers: { "X-API-KEY": key, Accept: "application/json" },
+      });
+    }
     if (!res.ok) throw new Error(`you.com ${res.status}: ${await res.text()}`);
     const data = (await res.json()) as Record<string, unknown>;
 
