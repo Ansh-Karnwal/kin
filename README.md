@@ -1,6 +1,5 @@
 # Hearth
----
-🥇 **First Place @ Agent Native Hackathon**
+## 🏆 First Place @ Agent Native Hackathon
 
 **A household operations agent that lives inside your group chat.**
 
