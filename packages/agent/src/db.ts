@@ -13,9 +13,71 @@ import type {
 } from "./state.js";
 import { money } from "./state.js";
 
-const APP_ID = process.env.BUTTERBASE_APP_ID!;
-const API_KEY = process.env.BUTTERBASE_API_KEY!;
+const APP_ID = process.env.BUTTERBASE_APP_ID ?? "";
+const API_KEY = process.env.BUTTERBASE_API_KEY ?? "";
 const BASE = `https://api.butterbase.ai/v1/${APP_ID}`;
+
+// When Butterbase isn't configured (no creds), the whole state layer runs in an
+// in-memory store so the app works fully offline — critical for demos. State
+// resets on restart; the bridge re-seeds members on boot. Set both
+// BUTTERBASE_APP_ID and BUTTERBASE_API_KEY to use the real backend.
+const USE_MEMORY = !APP_ID || !API_KEY;
+if (USE_MEMORY) {
+  console.warn(
+    `[${new Date().toISOString()}] [db.memory_mode] Butterbase not configured — using in-memory state (resets on restart)`
+  );
+}
+
+// ── In-memory backend (PostgREST-subset emulation) ─────────────────────────────
+
+type Row = Record<string, unknown>;
+const mem: Record<string, Row[]> = {};
+const memTable = (t: string): Row[] => (mem[t] ??= []);
+
+/** Match a row against a qs filter map (supports eq./gte./lte.; ignores `order`). */
+function memMatch(row: Row, qs: Record<string, string>): boolean {
+  for (const [k, raw] of Object.entries(qs)) {
+    if (k === "order") continue;
+    const dot = raw.indexOf(".");
+    const op = raw.slice(0, dot);
+    const val = raw.slice(dot + 1);
+    const cur = String(row[k] ?? "");
+    if (op === "eq" && cur !== val) return false;
+    if (op === "gte" && !(cur >= val)) return false;
+    if (op === "lte" && !(cur <= val)) return false;
+  }
+  return true;
+}
+
+function memGet<T>(table: string, qs?: Record<string, string>): T[] {
+  let rows = memTable(table).map((r) => ({ ...r }));
+  if (qs) {
+    rows = rows.filter((r) => memMatch(r, qs));
+    if (qs.order) {
+      const i = qs.order.lastIndexOf(".");
+      const col = qs.order.slice(0, i);
+      const dir = qs.order.slice(i + 1);
+      rows.sort((a, b) => String(a[col] ?? "").localeCompare(String(b[col] ?? "")));
+      if (dir === "desc") rows.reverse();
+    }
+  }
+  return rows as T[];
+}
+
+function memPost<T>(table: string, body: unknown): T {
+  const row: Row = { ...(body as Row) };
+  if (row.id == null) row.id = crypto.randomUUID();
+  memTable(table).push(row);
+  return { ...row } as T;
+}
+
+function memPatch<T>(table: string, id: string, body: unknown): T | null {
+  const t = memTable(table);
+  const idx = t.findIndex((r) => String(r.id) === String(id));
+  if (idx === -1) return null;
+  t[idx] = { ...t[idx], ...(body as Row) };
+  return { ...t[idx] } as T;
+}
 
 // ── Low-level HTTP helpers ─────────────────────────────────────────────────────
 
@@ -28,6 +90,7 @@ function authHdr() {
 }
 
 async function get<T>(table: string, qs?: Record<string, string>): Promise<T[]> {
+  if (USE_MEMORY) return memGet<T>(table, qs);
   const url = new URL(`${BASE}/${table}`);
   if (qs) Object.entries(qs).forEach(([k, v]) => url.searchParams.set(k, v));
   const r = await fetch(url.toString(), { headers: authHdr() });
@@ -42,6 +105,7 @@ async function getOne<T>(table: string, id: string): Promise<T | null> {
 }
 
 async function post<T>(table: string, body: unknown): Promise<T> {
+  if (USE_MEMORY) return memPost<T>(table, body);
   const r = await fetch(`${BASE}/${table}`, {
     method: "POST",
     headers: hdrs(),
@@ -52,6 +116,10 @@ async function post<T>(table: string, body: unknown): Promise<T> {
 }
 
 async function patch<T>(table: string, id: string, body: unknown): Promise<T> {
+  if (USE_MEMORY) {
+    // Patch-if-exists, create-if-missing — callers always fetch the id first.
+    return (memPatch<T>(table, id, body) ?? memPost<T>(table, { id, ...(body as Row) }));
+  }
   const r = await fetch(`${BASE}/${table}/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: hdrs(),
@@ -62,6 +130,12 @@ async function patch<T>(table: string, id: string, body: unknown): Promise<T> {
 }
 
 async function del(table: string, id: string): Promise<void> {
+  if (USE_MEMORY) {
+    const t = memTable(table);
+    const idx = t.findIndex((r) => String(r.id) === String(id));
+    if (idx !== -1) t.splice(idx, 1);
+    return;
+  }
   const r = await fetch(`${BASE}/${table}/${encodeURIComponent(id)}`, {
     method: "DELETE",
     headers: authHdr(),
@@ -71,6 +145,9 @@ async function del(table: string, id: string): Promise<void> {
 
 /** PATCH if exists, POST if not. */
 async function upsert<T>(table: string, id: string, body: unknown): Promise<T> {
+  if (USE_MEMORY) {
+    return (memPatch<T>(table, id, body) ?? memPost<T>(table, { id, ...(body as Row) }));
+  }
   const r = await fetch(`${BASE}/${table}/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: hdrs(),

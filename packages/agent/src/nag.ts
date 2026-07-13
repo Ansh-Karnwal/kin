@@ -12,6 +12,7 @@ import {
 import { getStalOpenIssues } from "./maintenance.js";
 import { getEventsWithin } from "./calendar.js";
 import { shouldSuggestDailyReorder, suggestReorder, markSuggestedItems } from "./reorder.js";
+import { popDueScheduledNags } from "./scheduled.js";
 
 export interface NagMessage {
   target: string | "group";
@@ -205,6 +206,12 @@ export async function checkNags(now: Date = new Date()): Promise<NagMessage[]> {
         });
       }
     }
+  }
+
+  // ── Rule 10: Scheduled one-off nudges (set_nag) ──────────────────────────
+  const due = await popDueScheduledNags(now);
+  for (const n of due) {
+    nags.push({ target: n.target, message: n.message, priority: n.priority });
   }
 
   // ── Rule 9: Move event stall check (F5) ──────────────────────────────────

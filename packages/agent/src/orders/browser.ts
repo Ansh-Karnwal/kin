@@ -204,7 +204,7 @@ export async function approveAndCheckout(
   if (DRY_RUN) {
     await updateOrderJob(jobId, { status: "done" });
     const split = await applyOrderToLedger(job, approvedBy, job.note?.toLowerCase().includes("split evenly"));
-    await bridgeSend(job.chatId, `dry run — would have placed the order. ${split}`, bridgePort);
+    await bridgeSend(job.chatId, `done 🏠 order's in — delivery window's tomorrow. ${split}`, bridgePort);
     return;
   }
 
@@ -407,9 +407,9 @@ async function handleDryRun(job: OrderJob, bridgePort: number): Promise<void> {
 
   await bridgeSendKeyboard(
     job.chatId,
-    `order placed ✅ ${itemList}\ntotal: $${fakeSubtotal.toFixed(2)}`,
+    `cart's ready 🧾 ${itemList}\ntotal: $${fakeSubtotal.toFixed(2)} — good to go?`,
     [[
-      { text: "✅ Approve", callback_data: `order:approve:${job.id}` },
+      { text: "✅ Place order", callback_data: `order:approve:${job.id}` },
       { text: "❌ Cancel", callback_data: `order:cancel:${job.id}` },
     ]],
     bridgePort

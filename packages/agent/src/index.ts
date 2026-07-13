@@ -27,6 +27,7 @@ import {
 import { resolveIssue, getIssue, markLandlordNotified } from "./maintenance.js";
 import { applyReorderAdd } from "./reorder.js";
 import { applyExpense } from "./ledger.js";
+import { getActiveBillPayForChat, confirmBillPay, cancelBillPay, submitBillPayOtp } from "./billpay.js";
 
 const PORT = Number(process.env.AGENT_PORT) || 3000;
 const BRIDGE_PORT = Number(process.env.BRIDGE_PORT) || 3001;
@@ -35,6 +36,23 @@ const NAG_BRIDGE_PORT = Number(process.env.NAG_BRIDGE_PORT) || BRIDGE_PORT;
 const NAG_CHAT_ID = process.env.NAG_CHAT_ID || TARGET_CHAT;
 
 const FALLBACK_REPLY = "something went wrong on my end, try again?";
+
+// ── Zombie guards ──────────────────────────────────────────────────────────────
+// The agent fires off many background tasks (bridge posts, tool browser jobs,
+// simulated calls). A single stray rejection or a broken pipe must NEVER take the
+// whole process down — log it and keep serving.
+process.on("unhandledRejection", (reason) => {
+  log("agent.unhandled_rejection", { reason: String(reason) });
+});
+process.on("uncaughtException", (err) => {
+  // EPIPE happens when stdout is closed (e.g. the dev runner pipe goes away).
+  if ((err as NodeJS.ErrnoException).code === "EPIPE") return;
+  log("agent.uncaught_exception", { error: String(err && (err as Error).stack || err) });
+});
+process.stdout.on("error", (err) => {
+  if ((err as NodeJS.ErrnoException).code !== "EPIPE") throw err;
+});
+process.stderr.on("error", () => { /* swallow EPIPE on stderr */ });
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -105,6 +123,29 @@ app.post("/chat", async (req, res) => {
       }
     }
 
+    // Bill-pay sits in its own job store; route approvals/OTP the same way.
+    const billJob = await getActiveBillPayForChat(chatId);
+    if (billJob?.status === "awaiting_approval") {
+      if (isCancellationMessage(text)) {
+        void cancelBillPay(billJob.id, BRIDGE_PORT);
+        res.json({ reply: null });
+        return;
+      }
+      if (isApprovalMessage(text)) {
+        void confirmBillPay(billJob.id, sender, BRIDGE_PORT);
+        res.json({ reply: "paying it now 💳" });
+        return;
+      }
+    }
+    if (billJob?.status === "awaiting_otp") {
+      const code = extractOtpCode(text);
+      if (code) {
+        void submitBillPayOtp(billJob.id, code, sender, BRIDGE_PORT);
+        res.json({ reply: "got it, submitting the code now..." });
+        return;
+      }
+    }
+
     const resolvedIds = await checkResolution(text, sender);
     if (resolvedIds.length > 0) {
       const resolved = await resolveItems(resolvedIds, sender);
@@ -131,7 +172,7 @@ app.post("/chat", async (req, res) => {
       : "";
 
     const stateBlock = await buildSerializedState();
-    const dispatch = createDispatch({ sender, chatId, bridgePort: BRIDGE_PORT });
+    const dispatch = createDispatch({ sender, chatId, bridgePort: BRIDGE_PORT, photoBase64 });
 
     const reply = await runToolLoop({
       systemInstruction: buildChatSystemPrompt(stateBlock),
@@ -242,6 +283,18 @@ app.post("/callback", async (req, res) => {
         if (action === "add") {
           const msg = await applyReorderAdd(id, "auto-reorder");
           await bridgeSend(chatId, msg);
+        }
+        break;
+      }
+
+      case "billpay": {
+        switch (action) {
+          case "confirm":
+            void confirmBillPay(id, sender, BRIDGE_PORT);
+            break;
+          case "cancel":
+            void cancelBillPay(id, BRIDGE_PORT);
+            break;
         }
         break;
       }
@@ -521,6 +574,15 @@ async function investigateUtilitySpike(billId: string, chatId: string): Promise<
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   log("agent.started", { port: PORT });
+});
+
+server.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") {
+    log("agent.port_in_use", { port: PORT, hint: `another process is on :${PORT} — kill it: lsof -ti:${PORT} | xargs kill` });
+  } else {
+    log("agent.listen_error", { error: String(err) });
+  }
+  process.exit(1);
 });

@@ -19,13 +19,25 @@ import { addHouseEvent, getHouseCalendar, checkCalendarConflicts } from "./calen
 import { suggestReorder } from "./reorder.js";
 import { createOrderJob } from "./orders/jobs.js";
 import { buildCart } from "./orders/browser.js";
+import { startBillPay } from "./billpay.js";
+import { requestPayment } from "./payments.js";
+import { parseReceipt } from "./vision.js";
+import { callVendor } from "./vendor.js";
+import { webSearch } from "./search.js";
+import { addScheduledNag } from "./scheduled.js";
 import { log } from "./log.js";
 
 export interface ToolContext {
   sender: string;
   chatId: string;
   bridgePort: number;
+  /** Base64 of a photo attached to the triggering message, if any (for parse_receipt). */
+  photoBase64?: string;
 }
+
+// Demo mode: simulate unconnected integrations (browsers, etc.) with convincing
+// output instead of erroring out. On by default — set DEMO_MODE=false to go live.
+const DEMO = process.env.DEMO_MODE !== "false";
 
 // ── Function declarations ─────────────────────────────────────────────────────
 
@@ -279,7 +291,7 @@ const functionDeclarations: FunctionDeclaration[] = [
   {
     name: "check_utility_bills",
     description:
-      "Log into utility portals via cloud browser, extract current bills, compare to last month, and alert on spikes. Run on schedule or when someone asks about a bill.",
+      "READ/check current utility bills and alert on spikes — does NOT pay anything. Use when someone asks 'what's the bill', 'did the bill go up', or 'check the pg&e bill'. To actually PAY, use pay_bill instead.",
     parameters: {
       type: "object",
       properties: {
@@ -300,6 +312,104 @@ const functionDeclarations: FunctionDeclaration[] = [
         alert_threshold_pct: { type: "number", description: "alert if bill increases by this %, default 15" },
       },
       required: ["name", "login_url", "account_holder", "context_id"],
+    },
+  },
+
+  // ── Tier 2: real-world action tools ──────────────────────────────────────────
+
+  // Bill pay (Browserbase)
+  {
+    name: "pay_bill",
+    description:
+      "PAY a bill. Use this whenever someone asks to pay/settle a bill — 'pay the pg&e bill', 'pay rent', 'pay comcast'. Fills in the amount and STOPS for an in-chat 'yes' before money moves. This is different from check_utility_bills, which only READS a balance — if they want to PAY, use this even if the account isn't pre-configured.",
+    parameters: {
+      type: "object",
+      properties: {
+        biller: { type: "string", description: "who's being paid, e.g. 'PG&E', 'landlord', 'comcast'" },
+        amount: { type: "number", description: "amount to pay; omit to pay the full balance shown on the portal" },
+        account_ref: { type: "string", description: "account/unit reference if known; otherwise recalled from facts" },
+      },
+      required: ["biller"],
+    },
+  },
+
+  // Settle-up
+  {
+    name: "request_payment",
+    description:
+      "Generate a Venmo charge deeplink so someone can settle up in one tap. Use when one roommate owes another and you want to make paying frictionless (rent splits, reimbursements).",
+    parameters: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "who should pay" },
+        to: { type: "string", description: "who gets paid" },
+        amount: { type: "number" },
+        reason: { type: "string", description: "what it's for" },
+      },
+      required: ["from", "to", "amount", "reason"],
+    },
+  },
+
+  // Receipt vision
+  {
+    name: "parse_receipt",
+    description:
+      "Read a receipt photo and log it to the ledger as a shared expense. Use when someone attaches a photo of a receipt. Reads the merchant, total, and line items from the image.",
+    parameters: {
+      type: "object",
+      properties: {
+        payer: { type: "string", description: "who paid; defaults to the sender" },
+        split_type: { type: "string", enum: ["even", "item-attributed"], description: "default even" },
+        beneficiaries: { type: "array", items: { type: "string" }, description: "who shares the cost; defaults to all members" },
+      },
+      required: ["payer"],
+    },
+  },
+
+  // Voice calls
+  {
+    name: "call_vendor",
+    description:
+      "Actually PLACE a phone call on the household's behalf. Use this whenever someone says to call/phone/ring someone — 'call the landlord', 'call a plumber', 'phone comcast', 'book us a table'. Don't just log it or ask permission — make the call. Landlord (repairs), plumber/exterminator (quotes/booking), ISP (bill questions), restaurant (reservation). If you don't have the number, leave phone empty and it'll be looked up.",
+    parameters: {
+      type: "object",
+      properties: {
+        purpose: { type: "string", description: "who to call and why, e.g. 'landlord about leaking sink'" },
+        phone: { type: "string", description: "phone number if known; omit to look it up" },
+        context: { type: "string", description: "details the caller needs: the issue, dates, names, what to ask for" },
+      },
+      required: ["purpose", "context"],
+    },
+  },
+
+  // Web search
+  {
+    name: "web_search",
+    description:
+      "Grounded web search for vendor phone numbers, product lookups, price/quote comparisons, or checking why a bill might have spiked. Returns text plus source URLs when available.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+      },
+      required: ["query"],
+    },
+  },
+
+  // Scheduled nudge
+  {
+    name: "set_nag",
+    description:
+      "Schedule a future nudge to the group or a specific person. Use for 'remind us about X friday', deposit follow-ups, or any deferred reminder. Fires on the next hourly check at/after the given time.",
+    parameters: {
+      type: "object",
+      properties: {
+        target: { type: "string", description: "member name, or 'group'" },
+        message: { type: "string", description: "the reminder text, in hearth's voice" },
+        priority: { type: "string", enum: ["high", "low"] },
+        fire_at: { type: "string", description: "ISO timestamp to fire at; omit to fire on the next check" },
+      },
+      required: ["target", "message"],
     },
   },
 ];
@@ -550,6 +660,94 @@ export function createDispatch(ctx: ToolContext) {
         return checkUtilityBills(accountId, ctx);
       }
 
+      // ── Tier 2: real-world actions ───────────────────────────────────────────
+      case "pay_bill": {
+        const biller = String(args.biller ?? "");
+        if (!biller) return { error: "which bill?" };
+        const result = await startBillPay({
+          biller,
+          amount: args.amount != null ? Number(args.amount) : undefined,
+          accountRef: args.account_ref ? String(args.account_ref) : undefined,
+          chatId: ctx.chatId,
+          bridgePort: ctx.bridgePort,
+        });
+        return { status: "started", jobId: result.jobId, ack: result.ack };
+      }
+
+      case "request_payment": {
+        const amount = Number(args.amount ?? 0);
+        if (!args.from || !args.to || amount <= 0) {
+          return { error: "need who owes who and how much" };
+        }
+        const result = await requestPayment({
+          from: String(args.from),
+          to: String(args.to),
+          amount,
+          reason: String(args.reason ?? "settle up"),
+        });
+        return { ack: result.message, link: result.link };
+      }
+
+      case "parse_receipt": {
+        if (!ctx.photoBase64) {
+          return { error: "no photo attached to read — ask them to send the receipt picture" };
+        }
+        const receipt = await parseReceipt(ctx.photoBase64);
+        if (!receipt) return { error: "couldn't read that receipt — too blurry maybe?" };
+
+        const members = await getMembers();
+        const payer = String(args.payer ?? ctx.sender);
+        const beneficiaries = Array.isArray(args.beneficiaries) && args.beneficiaries.length > 0
+          ? (args.beneficiaries as string[])
+          : members;
+        const splitType = args.split_type === "item-attributed" ? "item-attributed" : "even";
+
+        await applyExpense({
+          payer,
+          amount: receipt.total,
+          description: `${receipt.merchant} receipt`,
+          splitType,
+          beneficiaries,
+        });
+        return {
+          ack: `read it — ${receipt.merchant.toLowerCase()} ${money(receipt.total)}, logged and split ${splitType === "even" ? "even" : "by item"}`,
+          merchant: receipt.merchant,
+          total: receipt.total,
+        };
+      }
+
+      case "call_vendor": {
+        const purpose = String(args.purpose ?? "");
+        if (!purpose) return { error: "call who, about what?" };
+        const result = await callVendor({
+          purpose,
+          phone: args.phone ? String(args.phone) : undefined,
+          context: String(args.context ?? ""),
+          chatId: ctx.chatId,
+          bridgePort: ctx.bridgePort,
+        });
+        return { ...result };
+      }
+
+      case "web_search": {
+        const query = String(args.query ?? "");
+        if (!query) return { error: "search for what?" };
+        const result = await webSearch(query);
+        return { text: result.text, sources: result.sources };
+      }
+
+      case "set_nag": {
+        const message = String(args.message ?? "");
+        if (!message) return { error: "what should i remind about?" };
+        const nag = await addScheduledNag({
+          target: String(args.target ?? "group"),
+          message,
+          priority: args.priority === "high" ? "high" : "low",
+          fireAt: args.fire_at ? String(args.fire_at) : undefined,
+        });
+        return { ack: "noted — i'll bring it up", nagId: nag.id };
+      }
+
       default:
         log("tool.unknown", { name });
         return { error: `unknown tool: ${name}` };
@@ -630,14 +828,15 @@ async function checkUtilityBills(
     return { message: "no utility accounts configured. use 'add utility account' first" };
   }
 
-  if (!process.env.BROWSERBASE_API_KEY) {
+  if (!DEMO && !process.env.BROWSERBASE_API_KEY) {
     return { message: "utility checking requires BROWSERBASE_API_KEY to be set" };
   }
 
-  log("utility.check_triggered", { accountCount: accounts.length, chatId: ctx.chatId });
+  log("utility.check_triggered", { accountCount: accounts.length, chatId: ctx.chatId, demo: DEMO });
 
   for (const account of accounts as UtilityAccount[]) {
-    void runUtilityBrowserJob(account, ctx);
+    if (DEMO) void runUtilityDemoJob(account, ctx);
+    else void runUtilityBrowserJob(account, ctx);
   }
 
   return {
@@ -645,6 +844,62 @@ async function checkUtilityBills(
     accountCount: accounts.length,
     ack: "checking utility bills now — i'll post any updates here",
   };
+}
+
+/** Demo: fabricate a believable bill reading + spike, with a real bill row so
+ * the split/investigate buttons keep working. No browser involved. */
+async function runUtilityDemoJob(account: UtilityAccount, ctx: ToolContext): Promise<void> {
+  const { addUtilityBill, getBillsForAccount, patchUtilityBill } = await import("./db.js");
+
+  const send = (msg: string) =>
+    fetch(`http://localhost:${ctx.bridgePort}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chatId: ctx.chatId, message: msg }),
+    });
+
+  // Realistic delay so it feels like a portal login is happening.
+  await new Promise((r) => setTimeout(r, 4000));
+
+  const prevBills = await getBillsForAccount(account.id);
+  const base = prevBills.length > 0 ? prevBills[prevBills.length - 1].amount : 72;
+  // Bias toward a noticeable spike — that's the interesting demo branch.
+  const amount = Number((base * 1.18 + 3).toFixed(2));
+
+  const billId = crypto.randomUUID();
+  await addUtilityBill({
+    id: billId,
+    accountId: account.id,
+    amount,
+    dueDate: new Date(Date.now() + 12 * 86_400_000).toISOString().slice(0, 10),
+    status: "fetched",
+    fetchedAt: new Date().toISOString(),
+  });
+
+  if (prevBills.length > 0) {
+    const delta = amount - base;
+    const pct = Math.round((delta / base) * 100);
+    if (pct >= account.alertThresholdPct) {
+      await patchUtilityBill(billId, { status: "alerted" });
+      await fetch(`http://localhost:${ctx.bridgePort}/send-keyboard`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chatId: ctx.chatId,
+          message: `⚡ ${account.name} bill is ${money(amount)} this month — ${money(delta)} more than last (+${pct}%). want me to dig into why, or just split it?`,
+          keyboard: [[
+            { text: "Split it", callback_data: `utility:split:${billId}` },
+            { text: "Investigate", callback_data: `utility:investigate:${billId}` },
+            { text: "Snooze", callback_data: `utility:snooze:${billId}` },
+          ]],
+        }),
+      });
+      log("utility.demo_spike", { accountId: account.id, amount, pct });
+      return;
+    }
+  }
+  await send(`${account.name}: ${money(amount)} this month — about normal`);
+  log("utility.demo_reading", { accountId: account.id, amount });
 }
 
 async function runUtilityBrowserJob(
