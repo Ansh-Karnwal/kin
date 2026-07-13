@@ -1,6 +1,6 @@
 # Hearth
 
-*****A household operations agent that lives inside your group chat.***
+**FIRST PLACE @ Agent Native Hackathon**
 
 **A household operations agent that lives inside your group chat.**
 
