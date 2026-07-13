@@ -1,6 +1,6 @@
-import { generateJson, LITE_MODEL } from "./gemini.js";
+import { generateJson, LITE_MODEL } from "./llm.js";
 import { buildUtilitySystemPrompt, JSON_ONLY } from "./prompts.js";
-import { serializeState, state } from "./state.js";
+import { buildSerializedState, getPendingItems, addPendingItem as addPendingItemDb, resolvePendingItem } from "./db.js";
 import { log } from "./log.js";
 import type { PendingItem } from "./state.js";
 
@@ -23,6 +23,7 @@ export async function parsePendingItem(
   sender: string
 ): Promise<PendingItem | null> {
   const now = new Date();
+  const stateBlock = await buildSerializedState();
 
   const prompt = `Does this message express something that needs to be done but hasn't been assigned to anyone yet?
 
@@ -46,14 +47,14 @@ NOT an action item:
 
   const result = await generateJson<ParsedItem | null>({
     model: LITE_MODEL,
-    systemInstruction: buildUtilitySystemPrompt("the action item parser", serializeState()),
+    systemInstruction: buildUtilitySystemPrompt("the action item parser", stateBlock),
     prompt,
   });
 
   if (result === null || !isParsedItem(result)) return null;
 
   const item: PendingItem = {
-    id: String(Date.now()),
+    id: crypto.randomUUID(),
     description: result.description,
     raisedBy: sender,
     raisedAt: now.toISOString(),
@@ -77,9 +78,10 @@ export async function checkResolution(
   text: string,
   sender: string
 ): Promise<string[]> {
-  const open = state.pendingItems.filter((i) => !i.resolved);
+  const open = await getPendingItems(true);
   if (open.length === 0) return [];
 
+  const stateBlock = await buildSerializedState();
   const itemList = open
     .map((i) => `id:${i.id} — "${i.description}" (raised by ${i.raisedBy})`)
     .join("\n");
@@ -100,29 +102,23 @@ Does not resolve: questions, unrelated chat, new action items`;
 
   const result = await generateJson<ResolutionCheck>({
     model: LITE_MODEL,
-    systemInstruction: buildUtilitySystemPrompt("the resolution checker", serializeState()),
+    systemInstruction: buildUtilitySystemPrompt("the resolution checker", stateBlock),
     prompt,
   });
 
   return result?.resolvedIds ?? [];
 }
 
-export function applyPendingItem(item: PendingItem): void {
-  state.pendingItems.push(item);
+export async function applyPendingItem(item: PendingItem): Promise<void> {
+  await addPendingItemDb(item);
 }
 
-export function resolveItems(ids: string[], resolvedBy: string): PendingItem[] {
+export async function resolveItems(ids: string[], resolvedBy: string): Promise<PendingItem[]> {
   const now = new Date().toISOString();
-  const resolved: PendingItem[] = [];
-  for (const item of state.pendingItems) {
-    if (ids.includes(item.id) && !item.resolved) {
-      item.resolved = true;
-      item.resolvedAt = now;
-      item.resolvedBy = resolvedBy;
-      resolved.push(item);
-    }
-  }
-  return resolved;
+  const open = await getPendingItems(true);
+  const toResolve = open.filter((i) => ids.includes(i.id));
+  await Promise.all(toResolve.map((i) => resolvePendingItem(i.id, resolvedBy, now)));
+  return toResolve.map((i) => ({ ...i, resolved: true, resolvedAt: now, resolvedBy }));
 }
 
 export function buildPendingAck(item: PendingItem): string {

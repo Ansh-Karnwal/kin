@@ -1,0 +1,721 @@
+import "./env.js";
+import type {
+  GroceryItem,
+  LedgerEntry,
+  PendingItem,
+  MaintenanceIssue,
+  HouseEvent,
+  ConsumptionPattern,
+  OrderJob,
+  MoveEvent,
+  UtilityAccount,
+  UtilityBill,
+} from "./state.js";
+import { money } from "./state.js";
+
+const APP_ID = process.env.BUTTERBASE_APP_ID!;
+const API_KEY = process.env.BUTTERBASE_API_KEY!;
+const BASE = `https://api.butterbase.ai/v1/${APP_ID}`;
+
+// ── Low-level HTTP helpers ─────────────────────────────────────────────────────
+
+function hdrs() {
+  return { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` };
+}
+
+function authHdr() {
+  return { Authorization: `Bearer ${API_KEY}` };
+}
+
+async function get<T>(table: string, qs?: Record<string, string>): Promise<T[]> {
+  const url = new URL(`${BASE}/${table}`);
+  if (qs) Object.entries(qs).forEach(([k, v]) => url.searchParams.set(k, v));
+  const r = await fetch(url.toString(), { headers: authHdr() });
+  if (!r.ok) throw new Error(`GET ${table} ${r.status}: ${await r.text()}`);
+  return r.json() as Promise<T[]>;
+}
+
+async function getOne<T>(table: string, id: string): Promise<T | null> {
+  // Use query-filter form to avoid Butterbase's UUID-only path-param validation.
+  const rows = await get<T>(table, { id: `eq.${id}` });
+  return rows[0] ?? null;
+}
+
+async function post<T>(table: string, body: unknown): Promise<T> {
+  const r = await fetch(`${BASE}/${table}`, {
+    method: "POST",
+    headers: hdrs(),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`POST ${table} ${r.status}: ${await r.text()}`);
+  return r.json() as Promise<T>;
+}
+
+async function patch<T>(table: string, id: string, body: unknown): Promise<T> {
+  const r = await fetch(`${BASE}/${table}/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: hdrs(),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`PATCH ${table}/${id} ${r.status}: ${await r.text()}`);
+  return r.json() as Promise<T>;
+}
+
+async function del(table: string, id: string): Promise<void> {
+  const r = await fetch(`${BASE}/${table}/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: authHdr(),
+  });
+  if (!r.ok && r.status !== 404) throw new Error(`DELETE ${table}/${id} ${r.status}: ${await r.text()}`);
+}
+
+/** PATCH if exists, POST if not. */
+async function upsert<T>(table: string, id: string, body: unknown): Promise<T> {
+  const r = await fetch(`${BASE}/${table}/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: hdrs(),
+    body: JSON.stringify(body),
+  });
+  if (r.ok) return r.json() as Promise<T>;
+  if (r.status === 404) return post<T>(table, body);
+  throw new Error(`UPSERT ${table}/${id} ${r.status}: ${await r.text()}`);
+}
+
+// ── Members + balances ─────────────────────────────────────────────────────────
+
+export async function getMembers(): Promise<string[]> {
+  const rows = await get<{ name: string }>("members");
+  return rows.map((r) => r.name);
+}
+
+export async function getAllBalances(): Promise<Record<string, number>> {
+  const rows = await get<{ name: string; balance: number }>("members");
+  return Object.fromEntries(rows.map((r) => [r.name, r.balance]));
+}
+
+export async function getMemberBalance(name: string): Promise<number> {
+  const rows = await get<{ balance: number }>("members", { name: `eq.${name}` });
+  return rows[0]?.balance ?? 0;
+}
+
+/** Add members that don't exist yet; existing balances are untouched. */
+export async function setMembers(names: string[]): Promise<void> {
+  const existing = await get<{ name: string }>("members");
+  const existingNames = new Set(existing.map((r) => r.name));
+  await Promise.all(
+    names.filter((n) => !existingNames.has(n)).map((n) => post("members", { name: n, balance: 0 }))
+  );
+}
+
+export async function setBalance(name: string, balance: number): Promise<void> {
+  const rows = await get<{ id: string }>("members", { name: `eq.${name}` });
+  if (rows[0]?.id) {
+    await patch("members", rows[0].id, { balance });
+  } else {
+    await post("members", { name, balance });
+  }
+}
+
+export async function adjustBalance(name: string, delta: number): Promise<void> {
+  const rows = await get<{ id: string; balance: number }>("members", { name: `eq.${name}` });
+  if (rows[0]?.id) {
+    await patch("members", rows[0].id, { balance: (rows[0].balance ?? 0) + delta });
+  } else {
+    await post("members", { name, balance: delta });
+  }
+}
+
+// ── Household facts ────────────────────────────────────────────────────────────
+
+export async function getAllFacts(): Promise<Record<string, string>> {
+  const rows = await get<{ key: string; value: string }>("household_facts");
+  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+}
+
+export async function getFact(key: string): Promise<string | undefined> {
+  const rows = await get<{ value: string }>("household_facts", { key: `eq.${key}` });
+  return rows[0]?.value;
+}
+
+export async function setFact(key: string, value: string): Promise<void> {
+  const rows = await get<{ id: string }>("household_facts", { key: `eq.${key}` });
+  if (rows[0]?.id) {
+    await patch("household_facts", rows[0].id, { value });
+  } else {
+    await post("household_facts", { key, value });
+  }
+}
+
+export async function deleteFact(key: string): Promise<void> {
+  const rows = await get<{ id: string }>("household_facts", { key: `eq.${key}` });
+  if (rows[0]?.id) await del("household_facts", rows[0].id);
+}
+
+// ── Household config (scalar key-value for lastGroceryRun etc.) ───────────────
+
+export async function getConfig(key: string): Promise<string | undefined> {
+  const rows = await get<{ value: string }>("household_config", { key: `eq.${key}` });
+  return rows[0]?.value;
+}
+
+export async function setConfig(key: string, value: string): Promise<void> {
+  const rows = await get<{ id: string }>("household_config", { key: `eq.${key}` });
+  if (rows[0]?.id) {
+    await patch("household_config", rows[0].id, { value });
+  } else {
+    await post("household_config", { key, value });
+  }
+}
+
+// ── Grocery items ──────────────────────────────────────────────────────────────
+
+function toGroceryItem(r: {
+  id: string; item: string; requested_by: string; added_at: string; fulfilled: boolean;
+}): GroceryItem & { id: string } {
+  return { id: r.id, item: r.item, requestedBy: r.requested_by, addedAt: r.added_at, fulfilled: r.fulfilled };
+}
+
+export async function getGroceryItems(openOnly = false): Promise<(GroceryItem & { id: string })[]> {
+  const qs: Record<string, string> = openOnly ? { fulfilled: "eq.false" } : {};
+  const rows = await get<{ id: string; item: string; requested_by: string; added_at: string; fulfilled: boolean }>(
+    "grocery_items",
+    qs
+  );
+  return rows.map(toGroceryItem);
+}
+
+export async function addGroceryItem(id: string, item: string, requestedBy: string): Promise<void> {
+  await post("grocery_items", { id, item, requested_by: requestedBy });
+}
+
+export async function fulfillGroceryItem(id: string): Promise<void> {
+  await patch("grocery_items", id, { fulfilled: true });
+}
+
+export async function removeGroceryItem(id: string): Promise<void> {
+  await del("grocery_items", id);
+}
+
+export async function deleteAllFulfilledGrocery(): Promise<void> {
+  const fulfilled = await get<{ id: string }>("grocery_items", { fulfilled: "eq.true" });
+  await Promise.all(fulfilled.map((r) => del("grocery_items", r.id)));
+}
+
+// ── Ledger entries ─────────────────────────────────────────────────────────────
+
+function toLedgerEntry(r: {
+  id: string; payer: string; amount: number; description: string; split: string[]; timestamp: string;
+}): LedgerEntry {
+  return { payer: r.payer, amount: r.amount, description: r.description, split: r.split, timestamp: r.timestamp };
+}
+
+export async function getLedgerEntries(limit?: number): Promise<LedgerEntry[]> {
+  const qs: Record<string, string> = { order: "timestamp.asc" };
+  if (limit) qs.limit = String(limit);
+  const rows = await get<{ id: string; payer: string; amount: number; description: string; split: string[]; timestamp: string }>(
+    "ledger_entries",
+    qs
+  );
+  return rows.map(toLedgerEntry);
+}
+
+export async function addLedgerEntry(id: string, entry: LedgerEntry): Promise<void> {
+  await post("ledger_entries", {
+    id,
+    payer: entry.payer,
+    amount: entry.amount,
+    description: entry.description,
+    split: JSON.stringify(entry.split),
+    timestamp: entry.timestamp,
+  });
+}
+
+// ── Pending items ──────────────────────────────────────────────────────────────
+
+function toPendingItem(r: {
+  id: string; description: string; raised_by: string; raised_at: string;
+  deadline: string | null; resolved: boolean; resolved_at: string | null; resolved_by: string | null;
+}): PendingItem {
+  return {
+    id: r.id,
+    description: r.description,
+    raisedBy: r.raised_by,
+    raisedAt: r.raised_at,
+    deadline: r.deadline ?? undefined,
+    resolved: r.resolved,
+    resolvedAt: r.resolved_at ?? undefined,
+    resolvedBy: r.resolved_by ?? undefined,
+  };
+}
+
+export async function getPendingItems(openOnly = false): Promise<PendingItem[]> {
+  const qs: Record<string, string> = openOnly ? { resolved: "eq.false" } : {};
+  const rows = await get<{
+    id: string; description: string; raised_by: string; raised_at: string;
+    deadline: string | null; resolved: boolean; resolved_at: string | null; resolved_by: string | null;
+  }>("pending_items", qs);
+  return rows.map(toPendingItem);
+}
+
+export async function addPendingItem(item: PendingItem): Promise<void> {
+  await post("pending_items", {
+    id: item.id,
+    description: item.description,
+    raised_by: item.raisedBy,
+    raised_at: item.raisedAt,
+    deadline: item.deadline ?? null,
+    resolved: false,
+  });
+}
+
+export async function resolvePendingItem(id: string, resolvedBy: string, resolvedAt: string): Promise<void> {
+  await patch("pending_items", id, { resolved: true, resolved_by: resolvedBy, resolved_at: resolvedAt });
+}
+
+// ── Maintenance issues ─────────────────────────────────────────────────────────
+
+function toMaintenanceIssue(r: {
+  id: string; description: string; reported_by: string; status: string; priority: string;
+  first_seen_at: string; last_updated_at: string; resolution_notes: string | null;
+  landlord_notified_at: string | null; scheduled_for: string | null; vendor: string | null;
+  photo_urls: string[];
+}): MaintenanceIssue {
+  return {
+    id: r.id,
+    description: r.description,
+    reportedBy: r.reported_by,
+    status: r.status as MaintenanceIssue["status"],
+    priority: r.priority as MaintenanceIssue["priority"],
+    firstSeenAt: r.first_seen_at,
+    lastUpdatedAt: r.last_updated_at,
+    resolutionNotes: r.resolution_notes ?? undefined,
+    landlordNotifiedAt: r.landlord_notified_at ?? undefined,
+    scheduledFor: r.scheduled_for ?? undefined,
+    vendor: r.vendor ?? undefined,
+    photoUrls: r.photo_urls ?? [],
+  };
+}
+
+export async function getMaintenanceIssues(statusFilter?: string): Promise<MaintenanceIssue[]> {
+  const qs: Record<string, string> = {};
+  if (statusFilter) qs.status = `eq.${statusFilter}`;
+  const rows = await get<Parameters<typeof toMaintenanceIssue>[0]>("maintenance_issues", qs);
+  return rows.map(toMaintenanceIssue);
+}
+
+export async function getMaintenanceIssue(id: string): Promise<MaintenanceIssue | undefined> {
+  const row = await getOne<Parameters<typeof toMaintenanceIssue>[0]>("maintenance_issues", id);
+  return row ? toMaintenanceIssue(row) : undefined;
+}
+
+export async function addMaintenanceIssue(issue: MaintenanceIssue): Promise<void> {
+  await post("maintenance_issues", {
+    id: issue.id,
+    description: issue.description,
+    reported_by: issue.reportedBy,
+    status: issue.status,
+    priority: issue.priority,
+    first_seen_at: issue.firstSeenAt,
+    last_updated_at: issue.lastUpdatedAt,
+    photo_urls: JSON.stringify(issue.photoUrls),
+  });
+}
+
+export async function patchMaintenanceIssue(
+  id: string,
+  patch_: Partial<{
+    status: string; priority: string; lastUpdatedAt: string; resolutionNotes: string;
+    landlordNotifiedAt: string; scheduledFor: string; vendor: string; photoUrls: string[];
+  }>
+): Promise<void> {
+  const body: Record<string, unknown> = {};
+  if (patch_.status !== undefined) body.status = patch_.status;
+  if (patch_.priority !== undefined) body.priority = patch_.priority;
+  if (patch_.lastUpdatedAt !== undefined) body.last_updated_at = patch_.lastUpdatedAt;
+  if (patch_.resolutionNotes !== undefined) body.resolution_notes = patch_.resolutionNotes;
+  if (patch_.landlordNotifiedAt !== undefined) body.landlord_notified_at = patch_.landlordNotifiedAt;
+  if (patch_.scheduledFor !== undefined) body.scheduled_for = patch_.scheduledFor;
+  if (patch_.vendor !== undefined) body.vendor = patch_.vendor;
+  if (patch_.photoUrls !== undefined) body.photo_urls = JSON.stringify(patch_.photoUrls);
+  await patch("maintenance_issues", id, body);
+}
+
+// ── House events ───────────────────────────────────────────────────────────────
+
+function toHouseEvent(r: {
+  id: string; title: string; event_date: string; event_time: string | null;
+  duration_minutes: number | null; all_day: boolean; created_by: string;
+  affects_members: string[]; event_type: string; notes: string | null; created_at: string;
+}): HouseEvent {
+  return {
+    id: r.id,
+    title: r.title,
+    eventDate: r.event_date,
+    eventTime: r.event_time ?? undefined,
+    durationMinutes: r.duration_minutes ?? undefined,
+    allDay: r.all_day,
+    createdBy: r.created_by,
+    affectsMembers: r.affects_members ?? [],
+    eventType: r.event_type as HouseEvent["eventType"],
+    notes: r.notes ?? undefined,
+    createdAt: r.created_at,
+  };
+}
+
+export async function getHouseEvents(fromDate?: string, toDate?: string): Promise<HouseEvent[]> {
+  const qs: Record<string, string> = { order: "event_date.asc" };
+  if (fromDate) qs.event_date = `gte.${fromDate}`;
+  if (toDate) qs["event_date_end"] = `lte.${toDate}`; // used below via custom logic
+  const rows = await get<Parameters<typeof toHouseEvent>[0]>("house_events", fromDate ? { event_date: `gte.${fromDate}`, order: "event_date.asc" } : { order: "event_date.asc" });
+  return rows.map(toHouseEvent);
+}
+
+export async function addHouseEvent(event: HouseEvent): Promise<void> {
+  await post("house_events", {
+    id: event.id,
+    title: event.title,
+    event_date: event.eventDate,
+    event_time: event.eventTime ?? null,
+    duration_minutes: event.durationMinutes ?? null,
+    all_day: event.allDay,
+    created_by: event.createdBy,
+    affects_members: JSON.stringify(event.affectsMembers),
+    event_type: event.eventType,
+    notes: event.notes ?? null,
+  });
+}
+
+// ── Consumption patterns ───────────────────────────────────────────────────────
+
+function toConsumptionPattern(r: {
+  id: string; item_name: string; avg_days_between_orders: number | null;
+  last_ordered_at: string; times_ordered: number; typical_requesters: string[]; updated_at: string;
+}): ConsumptionPattern {
+  return {
+    id: r.id,
+    itemName: r.item_name,
+    avgDaysBetweenOrders: r.avg_days_between_orders ?? undefined,
+    lastOrderedAt: r.last_ordered_at,
+    timesOrdered: r.times_ordered,
+    typicalRequesters: r.typical_requesters ?? [],
+    updatedAt: r.updated_at,
+  };
+}
+
+export async function getConsumptionPattern(itemName: string): Promise<ConsumptionPattern | undefined> {
+  const rows = await get<Parameters<typeof toConsumptionPattern>[0]>("consumption_patterns", {
+    item_name: `eq.${itemName}`,
+  });
+  return rows[0] ? toConsumptionPattern(rows[0]) : undefined;
+}
+
+export async function getAllConsumptionPatterns(): Promise<ConsumptionPattern[]> {
+  const rows = await get<Parameters<typeof toConsumptionPattern>[0]>("consumption_patterns");
+  return rows.map(toConsumptionPattern);
+}
+
+export async function upsertConsumptionPattern(pattern: ConsumptionPattern): Promise<void> {
+  // item_name is the unique key; id is the PK
+  const existing = await getConsumptionPattern(pattern.itemName);
+  if (existing) {
+    await patch("consumption_patterns", existing.id, {
+      avg_days_between_orders: pattern.avgDaysBetweenOrders ?? null,
+      last_ordered_at: pattern.lastOrderedAt,
+      times_ordered: pattern.timesOrdered,
+      typical_requesters: JSON.stringify(pattern.typicalRequesters),
+      updated_at: pattern.updatedAt,
+    });
+  } else {
+    await post("consumption_patterns", {
+      id: pattern.id,
+      item_name: pattern.itemName,
+      avg_days_between_orders: pattern.avgDaysBetweenOrders ?? null,
+      last_ordered_at: pattern.lastOrderedAt,
+      times_ordered: pattern.timesOrdered,
+      typical_requesters: JSON.stringify(pattern.typicalRequesters),
+      updated_at: pattern.updatedAt,
+    });
+  }
+}
+
+// ── Order jobs ─────────────────────────────────────────────────────────────────
+
+function toOrderJob(r: {
+  id: string; chat_id: string; status: string;
+  items: Array<{ name: string; requestedBy: string }>;
+  session_id: string | null; cart: unknown; subtotal: number | null;
+  note: string | null; created_at: string; updated_at: string;
+}): OrderJob {
+  return {
+    id: r.id,
+    chatId: r.chat_id,
+    status: r.status as OrderJob["status"],
+    items: (r.items ?? []) as Array<{ name: string; requestedBy: string }>,
+    sessionId: r.session_id ?? undefined,
+    cart: r.cart as OrderJob["cart"],
+    subtotal: r.subtotal ?? undefined,
+    note: r.note ?? undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+export async function getOrderJobById(id: string): Promise<OrderJob | undefined> {
+  const row = await getOne<Parameters<typeof toOrderJob>[0]>("order_jobs", id);
+  return row ? toOrderJob(row) : undefined;
+}
+
+export async function getActiveJobForChatDb(chatId: string): Promise<OrderJob | undefined> {
+  const terminal = ["done", "failed", "cancelled"];
+  const rows = await get<Parameters<typeof toOrderJob>[0]>("order_jobs", { chat_id: `eq.${chatId}` });
+  return rows.map(toOrderJob).find((j) => !terminal.includes(j.status));
+}
+
+export async function addOrderJob(job: OrderJob): Promise<void> {
+  await post("order_jobs", {
+    id: job.id,
+    chat_id: job.chatId,
+    status: job.status,
+    items: JSON.stringify(job.items),
+    session_id: job.sessionId ?? null,
+    cart: job.cart != null ? JSON.stringify(job.cart) : null,
+    subtotal: job.subtotal ?? null,
+    note: job.note ?? null,
+  });
+}
+
+export async function patchOrderJob(id: string, p: Partial<OrderJob>): Promise<void> {
+  const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (p.status !== undefined) body.status = p.status;
+  if (p.sessionId !== undefined) body.session_id = p.sessionId;
+  if (p.cart !== undefined) body.cart = JSON.stringify(p.cart);
+  if (p.subtotal !== undefined) body.subtotal = p.subtotal;
+  if (p.note !== undefined) body.note = p.note;
+  await patch("order_jobs", id, body);
+}
+
+// ── Move events ────────────────────────────────────────────────────────────────
+
+function toMoveEvent(r: {
+  id: string; chat_id: string; type: string; member: string; phase: string;
+  target_date: string; deposit_amount: number | null;
+  deposit_deductions: MoveEvent["depositDeductions"];
+  shared_assets: MoveEvent["sharedAssets"];
+  utility_transfer_status: MoveEvent["utilityTransferStatus"];
+  final_balance: number | null; created_at: string; updated_at: string;
+}): MoveEvent {
+  return {
+    id: r.id,
+    chatId: r.chat_id,
+    type: r.type as MoveEvent["type"],
+    member: r.member,
+    phase: r.phase as MoveEvent["phase"],
+    targetDate: r.target_date,
+    depositAmount: r.deposit_amount ?? undefined,
+    depositDeductions: r.deposit_deductions ?? [],
+    sharedAssets: r.shared_assets ?? [],
+    utilityTransferStatus: r.utility_transfer_status ?? {},
+    finalBalance: r.final_balance ?? undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+export async function getMoveEvent(id: string): Promise<MoveEvent | undefined> {
+  const row = await getOne<Parameters<typeof toMoveEvent>[0]>("move_events", id);
+  return row ? toMoveEvent(row) : undefined;
+}
+
+export async function getAllMoveEvents(): Promise<MoveEvent[]> {
+  const rows = await get<Parameters<typeof toMoveEvent>[0]>("move_events");
+  return rows.map(toMoveEvent);
+}
+
+export async function addMoveEvent(event: MoveEvent): Promise<void> {
+  await post("move_events", {
+    id: event.id,
+    chat_id: event.chatId,
+    type: event.type,
+    member: event.member,
+    phase: event.phase,
+    target_date: event.targetDate,
+    deposit_amount: event.depositAmount ?? null,
+    deposit_deductions: JSON.stringify(event.depositDeductions),
+    shared_assets: JSON.stringify(event.sharedAssets),
+    utility_transfer_status: JSON.stringify(event.utilityTransferStatus),
+    final_balance: event.finalBalance ?? null,
+  });
+}
+
+export async function patchMoveEvent(id: string, p: Partial<MoveEvent>): Promise<void> {
+  const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (p.phase !== undefined) body.phase = p.phase;
+  if (p.depositAmount !== undefined) body.deposit_amount = p.depositAmount;
+  if (p.depositDeductions !== undefined) body.deposit_deductions = JSON.stringify(p.depositDeductions);
+  if (p.sharedAssets !== undefined) body.shared_assets = JSON.stringify(p.sharedAssets);
+  if (p.utilityTransferStatus !== undefined) body.utility_transfer_status = JSON.stringify(p.utilityTransferStatus);
+  if (p.finalBalance !== undefined) body.final_balance = p.finalBalance;
+  await patch("move_events", id, body);
+}
+
+// ── Utility accounts ───────────────────────────────────────────────────────────
+
+function toUtilityAccount(r: {
+  id: string; name: string; login_url: string; context_id: string;
+  account_holder: string; autopay_enabled: boolean; alert_threshold_pct: number; created_at: string;
+}): UtilityAccount {
+  return {
+    id: r.id,
+    name: r.name,
+    loginUrl: r.login_url,
+    contextId: r.context_id,
+    accountHolder: r.account_holder,
+    autopayEnabled: r.autopay_enabled,
+    alertThresholdPct: r.alert_threshold_pct,
+    createdAt: r.created_at,
+  };
+}
+
+export async function getUtilityAccount(id: string): Promise<UtilityAccount | undefined> {
+  const row = await getOne<Parameters<typeof toUtilityAccount>[0]>("utility_accounts", id);
+  return row ? toUtilityAccount(row) : undefined;
+}
+
+export async function getAllUtilityAccounts(): Promise<UtilityAccount[]> {
+  const rows = await get<Parameters<typeof toUtilityAccount>[0]>("utility_accounts");
+  return rows.map(toUtilityAccount);
+}
+
+export async function addUtilityAccount(account: UtilityAccount): Promise<void> {
+  await post("utility_accounts", {
+    id: account.id,
+    name: account.name,
+    login_url: account.loginUrl,
+    context_id: account.contextId,
+    account_holder: account.accountHolder,
+    autopay_enabled: account.autopayEnabled,
+    alert_threshold_pct: account.alertThresholdPct,
+  });
+}
+
+// ── Utility bills ──────────────────────────────────────────────────────────────
+
+function toUtilityBill(r: {
+  id: string; account_id: string; amount: number; due_date: string | null;
+  period_start: string | null; period_end: string | null; status: string; fetched_at: string;
+}): UtilityBill {
+  return {
+    id: r.id,
+    accountId: r.account_id,
+    amount: r.amount,
+    dueDate: r.due_date ?? undefined,
+    periodStart: r.period_start ?? undefined,
+    periodEnd: r.period_end ?? undefined,
+    status: r.status as UtilityBill["status"],
+    fetchedAt: r.fetched_at,
+  };
+}
+
+export async function getUtilityBill(id: string): Promise<UtilityBill | undefined> {
+  const row = await getOne<Parameters<typeof toUtilityBill>[0]>("utility_bills", id);
+  return row ? toUtilityBill(row) : undefined;
+}
+
+export async function getBillsForAccount(accountId: string): Promise<UtilityBill[]> {
+  const rows = await get<Parameters<typeof toUtilityBill>[0]>("utility_bills", {
+    account_id: `eq.${accountId}`,
+    order: "fetched_at.desc",
+  });
+  return rows.map(toUtilityBill);
+}
+
+export async function addUtilityBill(bill: UtilityBill): Promise<void> {
+  await post("utility_bills", {
+    id: bill.id,
+    account_id: bill.accountId,
+    amount: bill.amount,
+    due_date: bill.dueDate ?? null,
+    period_start: bill.periodStart ?? null,
+    period_end: bill.periodEnd ?? null,
+    status: bill.status,
+    fetched_at: bill.fetchedAt,
+  });
+}
+
+export async function patchUtilityBill(id: string, p: Partial<UtilityBill>): Promise<void> {
+  const body: Record<string, unknown> = {};
+  if (p.status !== undefined) body.status = p.status;
+  if (p.amount !== undefined) body.amount = p.amount;
+  await patch("utility_bills", id, body);
+}
+
+// ── State serialization (replaces serializeState() in state.ts) ────────────────
+
+function describeBalance(member: string, balance: number): string {
+  if (balance > 0.005) return `${member} is owed ${money(balance)}`;
+  if (balance < -0.005) return `${member} owes ${money(Math.abs(balance))}`;
+  return `${member} is settled up`;
+}
+
+function daysAgo(iso: string, now: Date): number {
+  return Math.floor((now.getTime() - Date.parse(iso)) / 86_400_000);
+}
+
+export async function buildSerializedState(now: Date = new Date()): Promise<string> {
+  const [members, balances, groceries, facts, pending, openMaint, lastRun] = await Promise.all([
+    getMembers(),
+    getAllBalances(),
+    getGroceryItems(true),
+    getAllFacts(),
+    getPendingItems(true),
+    getMaintenanceIssues("open"),
+    getConfig("last_grocery_run"),
+  ]);
+
+  const lines: string[] = ["CURRENT HOUSEHOLD STATE:"];
+
+  lines.push(`Members: ${members.length ? members.join(", ") : "(none configured yet)"}`);
+
+  const balanceLines = members.map((m) => describeBalance(m, balances[m] ?? 0));
+  lines.push(`Balances: ${balanceLines.length ? balanceLines.join(", ") : "(none)"}`);
+
+  lines.push(
+    `Grocery list: ${
+      groceries.length
+        ? groceries.map((g) => `${g.item} (${g.requestedBy})`).join(", ")
+        : "(empty)"
+    }`
+  );
+
+  if (lastRun) {
+    lines.push(`Last grocery run: ${lastRun.slice(0, 10)} (${daysAgo(lastRun, now)} days ago)`);
+  }
+
+  if (pending.length) {
+    lines.push(
+      `Open action items: ${pending
+        .map((i) => {
+          const age = Math.floor((now.getTime() - Date.parse(i.raisedAt)) / 3_600_000);
+          const dl = i.deadline ? `, due ${new Date(i.deadline).toISOString().slice(11, 16)}` : "";
+          return `"${i.description}" (${i.raisedBy}, ${age}h ago${dl})`;
+        })
+        .join("; ")}`
+    );
+  }
+
+  if (openMaint.length) {
+    lines.push(
+      `Open maintenance: ${openMaint
+        .map((i) => `${i.description} [${i.priority}] (${i.status})`)
+        .join("; ")}`
+    );
+  }
+
+  const factEntries = Object.entries(facts);
+  if (factEntries.length) {
+    lines.push(`Household facts: ${factEntries.map(([k, v]) => `${k}: ${v}`).join("; ")}`);
+  }
+
+  lines.push(`Today: ${now.toISOString().slice(0, 10)}`);
+  return lines.join("\n");
+}

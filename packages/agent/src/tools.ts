@@ -1,12 +1,19 @@
-import type { FunctionDeclaration } from "@google/genai";
-import { Type } from "@google/genai";
-import { state, money, moveEvents, utilityAccounts, type MoveEvent, type UtilityAccount } from "./state.js";
-import { parseExpense, applyExpense, buildExpenseAck } from "./ledger.js";
+import { money } from "./state.js";
+import type { MoveEvent, UtilityAccount } from "./state.js";
 import {
-  applyGroceryIntent,
-  parseGroceryIntent,
-  formatGroceryList,
-} from "./grocery.js";
+  getMembers,
+  getAllBalances,
+  setMembers,
+  setFact,
+  getAllFacts,
+  addUtilityAccount,
+  getAllUtilityAccounts,
+  getUtilityAccount,
+  addMoveEvent,
+  buildSerializedState,
+} from "./db.js";
+import { parseExpense, applyExpense, buildExpenseAck } from "./ledger.js";
+import { applyGroceryIntent, formatGroceryList } from "./grocery.js";
 import { logMaintenanceIssue, draftLandlordMessage, resolveIssue, getIssue } from "./maintenance.js";
 import { addHouseEvent, getHouseCalendar, checkCalendarConflicts } from "./calendar.js";
 import { suggestReorder } from "./reorder.js";
@@ -22,26 +29,32 @@ export interface ToolContext {
 
 // ── Function declarations ─────────────────────────────────────────────────────
 
-export const toolDeclarations: FunctionDeclaration[] = [
+interface FunctionDeclaration {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+const functionDeclarations: FunctionDeclaration[] = [
   // Ledger
   {
     name: "log_expense",
     description:
       "Record a shared expense and update balances. Use when someone says they paid for something shared (groceries, utilities, takeout, etc.).",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        payer: { type: Type.STRING, description: "who paid" },
-        amount: { type: Type.NUMBER, description: "total amount paid" },
-        description: { type: Type.STRING, description: "what the money was for" },
+        payer: { type: "string", description: "who paid" },
+        amount: { type: "number", description: "total amount paid" },
+        description: { type: "string", description: "what the money was for" },
         split_type: {
-          type: Type.STRING,
+          type: "string",
           enum: ["even", "item-attributed"],
           description: "even = equal split; item-attributed = specific costs to specific people",
         },
         beneficiaries: {
-          type: Type.ARRAY,
-          items: { type: Type.STRING },
+          type: "array",
+          items: { type: "string" },
           description: "everyone who shares the cost, including the payer if applicable",
         },
       },
@@ -53,7 +66,7 @@ export const toolDeclarations: FunctionDeclaration[] = [
   {
     name: "get_balances",
     description: "Return current balances for all household members. Use when someone asks who owes what.",
-    parameters: { type: Type.OBJECT, properties: {} },
+    parameters: { type: "object", properties: {} },
   },
 
   // Grocery
@@ -62,10 +75,10 @@ export const toolDeclarations: FunctionDeclaration[] = [
     description:
       "Add one or more items to the shared grocery list. Use when someone says they need something or are out of something.",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        items: { type: Type.ARRAY, items: { type: Type.STRING }, description: "item names, lowercase" },
-        requested_by: { type: Type.STRING, description: "who requested the items" },
+        items: { type: "array", items: { type: "string" }, description: "item names, lowercase" },
+        requested_by: { type: "string", description: "who requested the items" },
       },
       required: ["items", "requested_by"],
     },
@@ -74,10 +87,10 @@ export const toolDeclarations: FunctionDeclaration[] = [
     name: "remove_grocery_items",
     description: "Remove items from the grocery list (bought or no longer needed).",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        items: { type: Type.ARRAY, items: { type: Type.STRING } },
-        action: { type: Type.STRING, enum: ["fulfill", "remove"], description: "fulfill = bought; remove = taken off without buying" },
+        items: { type: "array", items: { type: "string" } },
+        action: { type: "string", enum: ["fulfill", "remove"], description: "fulfill = bought; remove = taken off without buying" },
       },
       required: ["items", "action"],
     },
@@ -85,7 +98,7 @@ export const toolDeclarations: FunctionDeclaration[] = [
   {
     name: "get_grocery_list",
     description: "Return the current grocery list. Use when someone asks what's on the list.",
-    parameters: { type: Type.OBJECT, properties: {} },
+    parameters: { type: "object", properties: {} },
   },
 
   // Grocery ordering
@@ -94,9 +107,9 @@ export const toolDeclarations: FunctionDeclaration[] = [
     description:
       "Build the grocery list into a cart on Instacart, screenshot it, and send it to the house for approval before checking out. Use when someone says 'do the grocery run', 'order groceries', 'place the order'.",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        note: { type: Type.STRING, description: "optional instruction, e.g. 'split evenly this time'" },
+        note: { type: "string", description: "optional instruction, e.g. 'split evenly this time'" },
       },
     },
   },
@@ -107,13 +120,30 @@ export const toolDeclarations: FunctionDeclaration[] = [
     description:
       "Log something that needs to be done but hasn't been assigned yet. Use for 'we should', 'someone needs to', 'can someone' messages.",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        description: { type: Type.STRING },
-        raised_by: { type: Type.STRING },
-        deadline: { type: Type.STRING, description: "ISO timestamp if a specific time was mentioned" },
+        description: { type: "string" },
+        raised_by: { type: "string" },
+        deadline: { type: "string", description: "ISO timestamp if a specific time was mentioned" },
       },
       required: ["description", "raised_by"],
+    },
+  },
+
+  // Members
+  {
+    name: "set_members",
+    description: "Set the list of household members. Call when someone asks to add, update, or configure who lives in the house.",
+    parameters: {
+      type: "object",
+      properties: {
+        names: {
+          type: "array",
+          items: { type: "string" },
+          description: "Full list of household member names",
+        },
+      },
+      required: ["names"],
     },
   },
 
@@ -122,10 +152,10 @@ export const toolDeclarations: FunctionDeclaration[] = [
     name: "set_household_fact",
     description: "Store a household fact (lease end date, landlord info, wifi password, etc.).",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        key: { type: Type.STRING, description: "e.g. 'lease_end', 'landlord_name', 'wifi_password'" },
-        value: { type: Type.STRING },
+        key: { type: "string", description: "e.g. 'lease_end', 'landlord_name', 'wifi_password'" },
+        value: { type: "string" },
       },
       required: ["key", "value"],
     },
@@ -133,7 +163,7 @@ export const toolDeclarations: FunctionDeclaration[] = [
   {
     name: "get_household_facts",
     description: "Return all stored household facts.",
-    parameters: { type: Type.OBJECT, properties: {} },
+    parameters: { type: "object", properties: {} },
   },
 
   // Maintenance (F1)
@@ -142,12 +172,12 @@ export const toolDeclarations: FunctionDeclaration[] = [
     description:
       "Log a household maintenance issue. Detect priority: urgent for water/heat/gas/safety; medium for appliances/fixtures; low for cosmetic. Call when someone mentions something broken, leaking, not working, or needing repair.",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        description: { type: Type.STRING },
-        reported_by: { type: Type.STRING },
-        priority: { type: Type.STRING, enum: ["low", "medium", "urgent"] },
-        photo_url: { type: Type.STRING, description: "Telegram file_id if a photo was attached" },
+        description: { type: "string" },
+        reported_by: { type: "string" },
+        priority: { type: "string", enum: ["low", "medium", "urgent"] },
+        photo_url: { type: "string", description: "Telegram file_id if a photo was attached" },
       },
       required: ["description", "reported_by", "priority"],
     },
@@ -157,9 +187,9 @@ export const toolDeclarations: FunctionDeclaration[] = [
     description:
       "Draft a professional maintenance message to the landlord, pulling in unit number, lease reference, and issue history.",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        issue_id: { type: Type.STRING },
+        issue_id: { type: "string" },
       },
       required: ["issue_id"],
     },
@@ -171,19 +201,19 @@ export const toolDeclarations: FunctionDeclaration[] = [
     description:
       "Add an event to the household calendar: repair windows, package arrivals, guests, trips, parties, lease dates, etc. Automatically add when grocery runs are scheduled or repairs booked.",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        title: { type: Type.STRING },
-        event_date: { type: Type.STRING, description: "ISO date YYYY-MM-DD" },
-        event_time: { type: Type.STRING, description: "HH:MM 24h, optional" },
-        duration_minutes: { type: Type.NUMBER },
-        all_day: { type: Type.BOOLEAN },
-        affects_members: { type: Type.ARRAY, items: { type: Type.STRING } },
+        title: { type: "string" },
+        event_date: { type: "string", description: "ISO date YYYY-MM-DD" },
+        event_time: { type: "string", description: "HH:MM 24h, optional" },
+        duration_minutes: { type: "number" },
+        all_day: { type: "boolean" },
+        affects_members: { type: "array", items: { type: "string" } },
         event_type: {
-          type: Type.STRING,
+          type: "string",
           enum: ["repair", "guest", "travel", "bill", "social", "move", "package", "other"],
         },
-        notes: { type: Type.STRING },
+        notes: { type: "string" },
       },
       required: ["title", "event_date", "event_type"],
     },
@@ -192,9 +222,9 @@ export const toolDeclarations: FunctionDeclaration[] = [
     name: "get_house_calendar",
     description: "Return upcoming household events for the next N days.",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        days: { type: Type.NUMBER, description: "default 7" },
+        days: { type: "number", description: "default 7" },
       },
     },
   },
@@ -203,12 +233,12 @@ export const toolDeclarations: FunctionDeclaration[] = [
     description:
       "Check if a proposed event conflicts with existing calendar entries. Use before confirming repair windows, guest visits, or house events.",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        event_date: { type: Type.STRING },
-        event_time: { type: Type.STRING },
-        duration_minutes: { type: Type.NUMBER },
-        affects_members: { type: Type.ARRAY, items: { type: Type.STRING } },
+        event_date: { type: "string" },
+        event_time: { type: "string" },
+        duration_minutes: { type: "number" },
+        affects_members: { type: "array", items: { type: "string" } },
       },
       required: ["event_date"],
     },
@@ -220,10 +250,10 @@ export const toolDeclarations: FunctionDeclaration[] = [
     description:
       "Check consumption patterns and proactively suggest reordering items likely running low. Call when someone mentions being out of something, or on the daily scheduled check.",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        triggered_by: { type: Type.STRING, enum: ["mention", "scheduled"] },
-        item_mentioned: { type: Type.STRING, description: "the specific item mentioned if triggered_by is mention" },
+        triggered_by: { type: "string", enum: ["mention", "scheduled"] },
+        item_mentioned: { type: "string", description: "the specific item mentioned if triggered_by is mention" },
       },
       required: ["triggered_by"],
     },
@@ -235,11 +265,11 @@ export const toolDeclarations: FunctionDeclaration[] = [
     description:
       "Start a move-in or move-out workflow. Triggered when someone mentions a roommate leaving or a new one joining.",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        type: { type: Type.STRING, enum: ["move_in", "move_out"] },
-        member: { type: Type.STRING, description: "name of the person moving" },
-        target_date: { type: Type.STRING, description: "ISO date of the move" },
+        type: { type: "string", enum: ["move_in", "move_out"] },
+        member: { type: "string", description: "name of the person moving" },
+        target_date: { type: "string", description: "ISO date of the move" },
       },
       required: ["type", "member", "target_date"],
     },
@@ -251,9 +281,9 @@ export const toolDeclarations: FunctionDeclaration[] = [
     description:
       "Log into utility portals via cloud browser, extract current bills, compare to last month, and alert on spikes. Run on schedule or when someone asks about a bill.",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        account_id: { type: Type.STRING, description: "specific account UUID; omit for all accounts" },
+        account_id: { type: "string", description: "specific account UUID; omit for all accounts" },
       },
     },
   },
@@ -261,18 +291,24 @@ export const toolDeclarations: FunctionDeclaration[] = [
     name: "add_utility_account",
     description: "Register a new utility account for monitoring (PG&E, Comcast, water, etc.).",
     parameters: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        name: { type: Type.STRING, description: "e.g. 'PG&E'" },
-        login_url: { type: Type.STRING },
-        account_holder: { type: Type.STRING },
-        context_id: { type: Type.STRING, description: "Browserbase persistent context ID" },
-        alert_threshold_pct: { type: Type.NUMBER, description: "alert if bill increases by this %, default 15" },
+        name: { type: "string", description: "e.g. 'PG&E'" },
+        login_url: { type: "string" },
+        account_holder: { type: "string" },
+        context_id: { type: "string", description: "Browserbase persistent context ID" },
+        alert_threshold_pct: { type: "number", description: "alert if bill increases by this %, default 15" },
       },
       required: ["name", "login_url", "account_holder", "context_id"],
     },
   },
 ];
+
+/** OpenAI tool format: wrap each declaration in { type: "function", function: ... } */
+export const toolDeclarations = functionDeclarations.map((d) => ({
+  type: "function" as const,
+  function: d,
+}));
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
@@ -292,10 +328,10 @@ export function createDispatch(ctx: ToolContext) {
         const text = `${args.payer} paid ${args.amount} for ${args.description}`;
         const expense = await parseExpense(text, ctx.sender);
         if (expense) {
-          applyExpense(expense);
-          return { ack: buildExpenseAck(expense) };
+          await applyExpense(expense);
+          return { ack: await buildExpenseAck(expense) };
         }
-        // Fall back to direct construction if parser can't extract it
+        const members = await getMembers();
         const directExpense = {
           payer: String(args.payer ?? ctx.sender),
           amount: Number(args.amount ?? 0),
@@ -303,19 +339,18 @@ export function createDispatch(ctx: ToolContext) {
           splitType: (args.split_type === "even" ? "even" : "item-attributed") as "even" | "item-attributed",
           beneficiaries: Array.isArray(args.beneficiaries)
             ? (args.beneficiaries as string[])
-            : state.members,
+            : members,
         };
-        applyExpense(directExpense);
-        return { ack: buildExpenseAck(directExpense) };
+        await applyExpense(directExpense);
+        return { ack: await buildExpenseAck(directExpense) };
       }
 
       case "get_balances": {
-        const result = Object.fromEntries(
-          state.members.map((m) => [m, state.balances[m] ?? 0])
-        );
-        const summary = state.members
+        const [members, balances] = await Promise.all([getMembers(), getAllBalances()]);
+        const result = Object.fromEntries(members.map((m) => [m, balances[m] ?? 0]));
+        const summary = members
           .map((m) => {
-            const b = state.balances[m] ?? 0;
+            const b = balances[m] ?? 0;
             if (b > 0.005) return `${m} is owed ${money(b)}`;
             if (b < -0.005) return `${m} owes ${money(Math.abs(b))}`;
             return `${m} is settled up`;
@@ -328,28 +363,27 @@ export function createDispatch(ctx: ToolContext) {
       case "add_grocery_items": {
         const items = Array.isArray(args.items) ? (args.items as string[]) : [];
         const requestedBy = String(args.requested_by ?? ctx.sender);
-        const ack = applyGroceryIntent({ action: "add", items, requestedBy });
+        const ack = await applyGroceryIntent({ action: "add", items, requestedBy });
         return { ack };
       }
 
       case "remove_grocery_items": {
         const items = Array.isArray(args.items) ? (args.items as string[]) : [];
         const action = args.action === "remove" ? "remove" : "fulfill";
-        const ack = applyGroceryIntent({ action, items, requestedBy: ctx.sender });
+        const ack = await applyGroceryIntent({ action, items, requestedBy: ctx.sender });
         return { ack };
       }
 
       case "get_grocery_list": {
-        return { list: formatGroceryList() };
+        return { list: await formatGroceryList() };
       }
 
       // ── Grocery ordering ────────────────────────────────────────────────────
       case "place_grocery_order": {
         const note = args.note ? String(args.note) : undefined;
-        const job = createOrderJob(ctx.chatId, note);
+        const job = await createOrderJob(ctx.chatId, note);
         if (!job) return { error: "grocery list is empty — add some items first" };
 
-        // Fire and forget — buildCart is async and posts back via the bridge
         void buildCart(job.id, ctx.bridgePort);
 
         return {
@@ -362,20 +396,28 @@ export function createDispatch(ctx: ToolContext) {
 
       // ── Action items ─────────────────────────────────────────────────────────
       case "add_action_item": {
-        const { pendingItems } = state;
+        const { addPendingItem } = await import("./db.js");
         const item = {
-          id: String(Date.now()),
+          id: crypto.randomUUID(),
           description: String(args.description ?? ""),
           raisedBy: String(args.raised_by ?? ctx.sender),
           raisedAt: new Date().toISOString(),
           deadline: args.deadline ? String(args.deadline) : undefined,
           resolved: false,
         };
-        pendingItems.push(item);
+        await addPendingItem(item);
         const timeHint = item.deadline
           ? ` — i'll check back if no one's on it by ${new Date(item.deadline).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
           : "";
         return { ack: `noted${timeHint}` };
+      }
+
+      // ── Members ──────────────────────────────────────────────────────────────
+      case "set_members": {
+        const names = (args.names as string[] | undefined)?.map(String).filter(Boolean) ?? [];
+        if (names.length === 0) return { error: "names required" };
+        await setMembers(names);
+        return { ack: `members set: ${names.join(", ")}` };
       }
 
       // ── Household facts ──────────────────────────────────────────────────────
@@ -383,23 +425,22 @@ export function createDispatch(ctx: ToolContext) {
         const key = String(args.key ?? "");
         const value = String(args.value ?? "");
         if (!key) return { error: "key required" };
-        state.householdFacts[key] = value;
+        await setFact(key, value);
         return { ack: `got it — saved ${key}` };
       }
 
       case "get_household_facts": {
-        return { facts: state.householdFacts };
+        return { facts: await getAllFacts() };
       }
 
       // ── Maintenance ──────────────────────────────────────────────────────────
       case "log_maintenance_issue": {
-        const result = logMaintenanceIssue({
+        const result = await logMaintenanceIssue({
           description: String(args.description ?? ""),
           reported_by: String(args.reported_by ?? ctx.sender),
           priority: (args.priority as "low" | "medium" | "urgent") ?? "medium",
           photo_url: args.photo_url ? String(args.photo_url) : undefined,
         });
-        // Send the keyboard message back via the bridge
         if (result.keyboard.length > 0) {
           void fetch(`http://localhost:${ctx.bridgePort}/send-keyboard`, {
             method: "POST",
@@ -413,7 +454,6 @@ export function createDispatch(ctx: ToolContext) {
 
       case "draft_landlord_message": {
         const result = await draftLandlordMessage({ issue_id: String(args.issue_id ?? "") });
-        // Send keyboard then return the draft for Gemini to relay
         if (result.keyboard.length > 0) {
           void fetch(`http://localhost:${ctx.bridgePort}/send-keyboard`, {
             method: "POST",
@@ -426,7 +466,7 @@ export function createDispatch(ctx: ToolContext) {
 
       // ── Calendar ─────────────────────────────────────────────────────────────
       case "add_house_event": {
-        const result = addHouseEvent({
+        const result = await addHouseEvent({
           title: String(args.title ?? ""),
           event_date: String(args.event_date ?? ""),
           event_time: args.event_time ? String(args.event_time) : undefined,
@@ -444,11 +484,11 @@ export function createDispatch(ctx: ToolContext) {
 
       case "get_house_calendar": {
         const days = args.days ? Number(args.days) : 7;
-        return { calendar: getHouseCalendar({ days }) };
+        return { calendar: await getHouseCalendar({ days }) };
       }
 
       case "check_calendar_conflicts": {
-        const conflicts = checkCalendarConflicts({
+        const conflicts = await checkCalendarConflicts({
           event_date: String(args.event_date ?? ""),
           event_time: args.event_time ? String(args.event_time) : undefined,
           duration_minutes: args.duration_minutes ? Number(args.duration_minutes) : undefined,
@@ -461,7 +501,7 @@ export function createDispatch(ctx: ToolContext) {
 
       // ── Reorder ──────────────────────────────────────────────────────────────
       case "suggest_reorder": {
-        const result = suggestReorder({
+        const result = await suggestReorder({
           triggered_by: args.triggered_by as "mention" | "scheduled",
           item_mentioned: args.item_mentioned ? String(args.item_mentioned) : undefined,
         });
@@ -489,7 +529,7 @@ export function createDispatch(ctx: ToolContext) {
 
       // ── Utility monitor ───────────────────────────────────────────────────────
       case "add_utility_account": {
-        const id = `util_${Date.now()}`;
+        const id = crypto.randomUUID();
         const account: UtilityAccount = {
           id,
           name: String(args.name ?? ""),
@@ -500,7 +540,7 @@ export function createDispatch(ctx: ToolContext) {
           alertThresholdPct: Number(args.alert_threshold_pct ?? 15),
           createdAt: new Date().toISOString(),
         };
-        utilityAccounts.set(id, account);
+        await addUtilityAccount(account);
         log("utility.account_added", { id, name: account.name, holder: account.accountHolder });
         return { ack: `added ${account.name} under ${account.accountHolder}`, accountId: id };
       }
@@ -519,14 +559,14 @@ export function createDispatch(ctx: ToolContext) {
 
 // ── Move mode helpers ─────────────────────────────────────────────────────────
 
-function initiateMove(args: {
+async function initiateMove(args: {
   type: "move_in" | "move_out";
   member: string;
   target_date: string;
   chatId: string;
   bridgePort: number;
-}): DispatchResult {
-  const id = `move_${Date.now()}`;
+}): Promise<DispatchResult> {
+  const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
   const event: MoveEvent = {
@@ -543,7 +583,7 @@ function initiateMove(args: {
     updatedAt: now,
   };
 
-  moveEvents.set(id, event);
+  await addMoveEvent(event);
   log("move.initiated", { id, type: args.type, member: args.member, targetDate: args.target_date });
 
   const verb = args.type === "move_out" ? "moving out" : "moving in";
@@ -552,7 +592,6 @@ function initiateMove(args: {
       ? "let's sort the deposit first — anyone have damage to flag beyond normal wear? share a photo if so."
       : `welcome to the house, ${args.member.toLowerCase()} 🏠 let's get you set up.`;
 
-  // Send a keyboard with the first-step prompt
   void fetch(`http://localhost:${args.bridgePort}/send-keyboard`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -577,19 +616,15 @@ function initiateMove(args: {
   };
 }
 
-// ── Utility bill check (stub — full Stagehand implementation) ─────────────────
+// ── Utility bill check ────────────────────────────────────────────────────────
 
 async function checkUtilityBills(
   accountId: string | undefined,
   ctx: ToolContext
 ): Promise<DispatchResult> {
-  if (process.env.UTILITY_AUTOPAY === undefined) {
-    // Guard: never run if not explicitly configured
-  }
-
   const accounts = accountId
-    ? [utilityAccounts.get(accountId)].filter(Boolean)
-    : [...utilityAccounts.values()];
+    ? [await getUtilityAccount(accountId)].filter(Boolean)
+    : await getAllUtilityAccounts();
 
   if (accounts.length === 0) {
     return { message: "no utility accounts configured. use 'add utility account' first" };
@@ -601,7 +636,6 @@ async function checkUtilityBills(
 
   log("utility.check_triggered", { accountCount: accounts.length, chatId: ctx.chatId });
 
-  // Launch browser jobs in parallel (one per account)
   for (const account of accounts as UtilityAccount[]) {
     void runUtilityBrowserJob(account, ctx);
   }
@@ -617,7 +651,7 @@ async function runUtilityBrowserJob(
   account: UtilityAccount,
   ctx: ToolContext
 ): Promise<void> {
-  const { utilityBills } = await import("./state.js");
+  const { addUtilityBill, getBillsForAccount, patchUtilityBill } = await import("./db.js");
 
   const sendUpdate = async (msg: string) => {
     await fetch(`http://localhost:${ctx.bridgePort}/send`, {
@@ -669,32 +703,29 @@ async function runUtilityBrowserJob(
 
       clearTimeout(heartbeat);
 
-      const billId = `bill_${Date.now()}`;
-      const newBill: import("./state.js").UtilityBill = {
+      const billId = crypto.randomUUID();
+      const newBill = {
         id: billId,
         accountId: account.id,
         amount: extracted.amount,
         dueDate: extracted.dueDate,
         periodStart: extracted.periodStart,
         periodEnd: extracted.periodEnd,
-        status: "fetched",
+        status: "fetched" as const,
         fetchedAt: new Date().toISOString(),
       };
 
-      utilityBills.set(billId, newBill);
+      await addUtilityBill(newBill);
 
-      // Compare to previous bill
-      const prevBills = [...utilityBills.values()]
-        .filter((b) => b.accountId === account.id && b.id !== billId)
-        .sort((a, b) => Date.parse(b.fetchedAt) - Date.parse(a.fetchedAt));
+      const prevBills = await getBillsForAccount(account.id);
+      const prevBill = prevBills.find((b) => b.id !== billId);
 
-      const prevBill = prevBills[0];
       if (prevBill) {
         const delta = extracted.amount - prevBill.amount;
         const pct = Math.round((delta / prevBill.amount) * 100);
 
         if (Math.abs(pct) >= account.alertThresholdPct && delta > 0) {
-          newBill.status = "alerted";
+          await patchUtilityBill(billId, { status: "alerted" });
           const msg = `⚡ ${account.name} bill is $${extracted.amount.toFixed(2)} this month — $${delta.toFixed(2)} more than last month (+${pct}%). want me to investigate why, or just split it?`;
 
           await fetch(`http://localhost:${ctx.bridgePort}/send-keyboard`, {

@@ -1,9 +1,10 @@
 import "./env.js";
 import express from "express";
 import { classifyMessage } from "./classifier.js";
-import { runToolLoop } from "./gemini.js";
+import { runToolLoop } from "./llm.js";
 import { buildChatSystemPrompt, findBannedWord } from "./prompts.js";
-import { serializeState, state } from "./state.js";
+import { buildSerializedState, getMembers, setMembers, getAllFacts, setFact, deleteFact, getMoveEvent, patchMoveEvent, getUtilityBill, getUtilityAccount, getAllUtilityAccounts, getAllBalances, patchUtilityBill } from "./db.js";
+import { money } from "./state.js";
 import { log } from "./log.js";
 import { checkNags } from "./nag.js";
 import { toolDeclarations, createDispatch } from "./tools.js";
@@ -25,10 +26,7 @@ import {
 } from "./orders/browser.js";
 import { resolveIssue, getIssue, markLandlordNotified } from "./maintenance.js";
 import { applyReorderAdd } from "./reorder.js";
-import { moveEvents } from "./state.js";
-import { utilityBills } from "./state.js";
 import { applyExpense } from "./ledger.js";
-import { money } from "./state.js";
 
 const PORT = Number(process.env.AGENT_PORT) || 3000;
 const BRIDGE_PORT = Number(process.env.BRIDGE_PORT) || 3001;
@@ -39,7 +37,7 @@ const NAG_CHAT_ID = process.env.NAG_CHAT_ID || TARGET_CHAT;
 const FALLBACK_REPLY = "something went wrong on my end, try again?";
 
 const app = express();
-app.use(express.json({ limit: "10mb" })); // photos may come in as base64
+app.use(express.json({ limit: "10mb" }));
 
 // ── Health ────────────────────────────────────────────────────────────────────
 
@@ -53,7 +51,7 @@ interface ChatRequest {
   sender: string;
   text: string;
   chatId: string;
-  photoBase64?: string; // B5: photo ingestion from bridge
+  photoBase64?: string;
 }
 
 function isChatRequest(body: unknown): body is ChatRequest {
@@ -76,15 +74,12 @@ app.post("/chat", async (req, res) => {
   log("chat.inbound", { sender, chatId, text: text.slice(0, 80) });
 
   try {
-    // ── Pending order intercept ───────────────────────────────────────────────
-    // Check for an active order job before anything else — approval/edit/cancel
-    // messages must be routed to the job, not the main classifier.
-    const activeJob = getActiveJobForChat(chatId);
+    const activeJob = await getActiveJobForChat(chatId);
 
     if (activeJob?.status === "awaiting_approval") {
       if (isCancellationMessage(text)) {
         await cancelOrder(activeJob.id, BRIDGE_PORT);
-        res.json({ reply: null }); // bridge already sends
+        res.json({ reply: null });
         return;
       }
       if (isEditMessage(text)) {
@@ -97,7 +92,6 @@ app.post("/chat", async (req, res) => {
         res.json({ reply: "placing the order now 🛒" });
         return;
       }
-      // Ambiguous text during approval → re-confirm
       res.json({ reply: "still waiting on the cart approval — say 'yes' to place it, 'cancel' to stop, or tell me what to change" });
       return;
     }
@@ -109,37 +103,38 @@ app.post("/chat", async (req, res) => {
         res.json({ reply: "got it, submitting the code now..." });
         return;
       }
-      // Not a code — pass through to normal handling
     }
 
-    // ── Resolution check ──────────────────────────────────────────────────────
     const resolvedIds = await checkResolution(text, sender);
     if (resolvedIds.length > 0) {
-      const resolved = resolveItems(resolvedIds, sender);
+      const resolved = await resolveItems(resolvedIds, sender);
       const reply = buildResolutionAck(resolved);
       log("chat.outbound", { sender, type: "resolution", resolved: resolvedIds });
       res.json({ reply });
       return;
     }
 
-    // ── Classifier pre-filter ─────────────────────────────────────────────────
+    // A direct address always wins: if someone @-mentions or names hearth, reply
+    // no matter the topic. Otherwise stay out of pure peer-to-peer chatter and
+    // only chime in when the message touches hearth's domains.
+    const addressedToHearth = /(^|\W)@?hearth\b/i.test(text);
     const classification = await classifyMessage(sender, text);
 
-    if (!classification.relevant && classification.confidence === "high") {
+    if (!addressedToHearth && !classification.relevant) {
       log("chat.skipped", { sender, type: classification.type });
       res.json({ reply: null });
       return;
     }
 
-    // ── Tool loop ─────────────────────────────────────────────────────────────
     const photoContext = photoBase64
       ? `\n[Note: ${sender} attached a photo to this message]`
       : "";
 
+    const stateBlock = await buildSerializedState();
     const dispatch = createDispatch({ sender, chatId, bridgePort: BRIDGE_PORT });
 
     const reply = await runToolLoop({
-      systemInstruction: buildChatSystemPrompt(serializeState()),
+      systemInstruction: buildChatSystemPrompt(stateBlock),
       tools: toolDeclarations,
       message: `${sender}: ${text}${photoContext}`,
       dispatch,
@@ -150,7 +145,6 @@ app.post("/chat", async (req, res) => {
 
     log("chat.outbound", { sender, type: classification.type, reply: reply.slice(0, 120) });
 
-    // If the tool loop sent a keyboard via the bridge and returned empty text, skip
     if (!reply || reply.trim() === "") {
       res.json({ reply: null });
     } else {
@@ -191,17 +185,14 @@ app.post("/callback", async (req, res) => {
   const sender = from?.name ?? from?.id ?? "unknown";
   log("callback.inbound", { queryId, data, chatId, sender });
 
-  // The bridge already answered the callback query (within 3s deadline).
-  // We just process the action and post results via /send.
   res.json({ ok: true });
 
   const parts = data.split(":");
   const [feature, action, ...rest] = parts;
-  const id = rest.join(":"); // rejoin in case id contains colons
+  const id = rest.join(":");
 
   try {
     switch (feature) {
-      // ── Order callbacks ───────────────────────────────────────────────────
       case "order": {
         switch (action) {
           case "approve":
@@ -214,7 +205,6 @@ app.post("/callback", async (req, res) => {
         break;
       }
 
-      // ── Maintenance callbacks ─────────────────────────────────────────────
       case "maintenance": {
         switch (action) {
           case "draft": {
@@ -227,51 +217,47 @@ app.post("/callback", async (req, res) => {
             break;
           }
           case "resolve":
-            bridgeSend(chatId, resolveIssue(id, sender));
+            await bridgeSend(chatId, await resolveIssue(id, sender));
             break;
           case "send_landlord": {
-            const issue = getIssue(id);
+            const issue = await getIssue(id);
             if (issue && process.env.LANDLORD_MESSAGE_ENABLED === "true") {
-              const landlordTg = state.householdFacts["landlord_telegram"];
+              const facts = await getAllFacts();
+              const landlordTg = facts["landlord_telegram"];
               if (landlordTg) {
                 await bridgeSend(landlordTg, `maintenance request from your tenants:\n\n${issue.description}`);
-                markLandlordNotified(id);
+                await markLandlordNotified(id);
                 await bridgeSend(chatId, "sent ✓");
               }
             }
             break;
           }
           case "noop":
-            break; // "I'll handle it" / "It's fine" — no action needed
+            break;
         }
         break;
       }
 
-      // ── Reorder callbacks ─────────────────────────────────────────────────
       case "reorder": {
         if (action === "add") {
-          const msg = applyReorderAdd(id, "auto-reorder");
+          const msg = await applyReorderAdd(id, "auto-reorder");
           await bridgeSend(chatId, msg);
         }
-        // "ignore" → do nothing
         break;
       }
 
-      // ── Utility callbacks ─────────────────────────────────────────────────
       case "utility": {
         switch (action) {
           case "split": {
-            const bill = utilityBills.get(id);
+            const bill = await getUtilityBill(id);
             if (!bill) break;
-            const members = state.members;
+            const members = await getMembers();
             if (members.length === 0) break;
 
-            // Find the account holder to set as payer
-            const { utilityAccounts } = await import("./state.js");
-            const account = utilityAccounts.get(bill.accountId);
+            const account = await getUtilityAccount(bill.accountId);
             const payer = account?.accountHolder ?? "unknown";
 
-            applyExpense({
+            await applyExpense({
               payer,
               amount: bill.amount,
               description: `utility bill (${account?.name ?? "utility"})`,
@@ -279,7 +265,7 @@ app.post("/callback", async (req, res) => {
               beneficiaries: members,
             });
 
-            bill.status = "paid";
+            await patchUtilityBill(id, { status: "paid" });
             const share = bill.amount / members.length;
             await bridgeSend(chatId, `logged — ${money(bill.amount)} split evenly, ${money(share)} each`);
             break;
@@ -290,8 +276,7 @@ app.post("/callback", async (req, res) => {
             break;
           }
           case "snooze": {
-            const bill = utilityBills.get(id);
-            if (bill) bill.status = "skipped";
+            await patchUtilityBill(id, { status: "skipped" });
             await bridgeSend(chatId, "ok, snoozed 👍");
             break;
           }
@@ -299,22 +284,19 @@ app.post("/callback", async (req, res) => {
         break;
       }
 
-      // ── Move mode callbacks ───────────────────────────────────────────────
       case "move": {
-        const moveEvent = moveEvents.get(id);
+        const moveEvent = await getMoveEvent(id);
         if (!moveEvent) break;
 
         switch (action) {
           case "keys_returned":
-            moveEvent.phase = "completed";
-            moveEvent.updatedAt = new Date().toISOString();
+            await patchMoveEvent(id, { phase: "completed" });
             log("move.completed", { id, member: moveEvent.member });
             await bridgeSend(chatId, `done 🏠 ${moveEvent.member.toLowerCase()}'s all squared away. good luck out there.`);
             break;
 
           case "deposit_full":
-            moveEvent.phase = "asset_split";
-            moveEvent.updatedAt = new Date().toISOString();
+            await patchMoveEvent(id, { phase: "asset_split" });
             await bridgeSend(chatId, `got it — full deposit back to ${moveEvent.member.toLowerCase()}. moving to asset split next.`);
             break;
 
@@ -323,8 +305,7 @@ app.post("/callback", async (req, res) => {
             break;
 
           case "onboard_done":
-            moveEvent.phase = "completed";
-            moveEvent.updatedAt = new Date().toISOString();
+            await patchMoveEvent(id, { phase: "completed" });
             await bridgeSend(chatId, `all set 🏠 welcome aboard, ${moveEvent.member.toLowerCase()}!`);
             break;
 
@@ -339,24 +320,24 @@ app.post("/callback", async (req, res) => {
   }
 });
 
-// ── Order management endpoints (for curl testing) ─────────────────────────────
+// ── Order management endpoints ─────────────────────────────────────────────────
 
 app.post("/order/:jobId/approve", async (req, res) => {
-  const job = getOrderJob(req.params.jobId);
+  const job = await getOrderJob(req.params.jobId);
   if (!job) { res.status(404).json({ error: "job not found" }); return; }
   void approveAndCheckout(job.id, "api", BRIDGE_PORT);
   res.json({ ok: true, jobId: job.id });
 });
 
 app.post("/order/:jobId/cancel", async (req, res) => {
-  const job = getOrderJob(req.params.jobId);
+  const job = await getOrderJob(req.params.jobId);
   if (!job) { res.status(404).json({ error: "job not found" }); return; }
   void cancelOrder(job.id, BRIDGE_PORT);
   res.json({ ok: true });
 });
 
 app.post("/order/:jobId/edit", async (req, res) => {
-  const job = getOrderJob(req.params.jobId);
+  const job = await getOrderJob(req.params.jobId);
   if (!job) { res.status(404).json({ error: "job not found" }); return; }
   const { instruction } = req.body as { instruction?: string };
   if (!instruction) { res.status(400).json({ error: "instruction required" }); return; }
@@ -365,7 +346,7 @@ app.post("/order/:jobId/edit", async (req, res) => {
 });
 
 app.post("/order/:jobId/otp", async (req, res) => {
-  const job = getOrderJob(req.params.jobId);
+  const job = await getOrderJob(req.params.jobId);
   if (!job) { res.status(404).json({ error: "job not found" }); return; }
   const { code } = req.body as { code?: string };
   if (!code) { res.status(400).json({ error: "code required" }); return; }
@@ -373,55 +354,55 @@ app.post("/order/:jobId/otp", async (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/order/:jobId", (req, res) => {
-  const job = getOrderJob(req.params.jobId);
+app.get("/order/:jobId", async (req, res) => {
+  const job = await getOrderJob(req.params.jobId);
   if (!job) { res.status(404).json({ error: "job not found" }); return; }
   res.json(job);
 });
 
 // ── State management endpoints ────────────────────────────────────────────────
 
-app.post("/members", (req, res) => {
+app.post("/members", async (req, res) => {
   const { members } = req.body as { members?: unknown };
   if (!Array.isArray(members) || !members.every((m) => typeof m === "string")) {
     res.status(400).json({ error: "expected { members: string[] }" });
     return;
   }
-  state.members = members;
-  for (const m of members) {
-    if (state.balances[m] === undefined) state.balances[m] = 0;
-  }
+  await setMembers(members as string[]);
   log("state.members_set", { members });
-  res.json({ ok: true, members: state.members });
+  res.json({ ok: true, members });
 });
 
-app.get("/balances", (_req, res) => {
-  res.json(Object.fromEntries(state.members.map((m) => [m, state.balances[m] ?? 0])));
+app.get("/balances", async (_req, res) => {
+  const [members, balances] = await Promise.all([getMembers(), getAllBalances()]);
+  res.json(Object.fromEntries(members.map((m) => [m, balances[m] ?? 0])));
 });
 
-app.post("/facts", (req, res) => {
+app.post("/facts", async (req, res) => {
   const { key, value } = req.body as { key?: unknown; value?: unknown };
   if (typeof key !== "string" || typeof value !== "string") {
     res.status(400).json({ error: "expected { key: string, value: string }" });
     return;
   }
-  state.householdFacts[key] = value;
+  await setFact(key, value);
   log("state.fact_set", { key, value });
-  res.json({ ok: true, facts: state.householdFacts });
+  const facts = await getAllFacts();
+  res.json({ ok: true, facts });
 });
 
-app.delete("/facts/:key", (req, res) => {
-  delete state.householdFacts[req.params.key];
+app.delete("/facts/:key", async (req, res) => {
+  await deleteFact(req.params.key);
   log("state.fact_deleted", { key: req.params.key });
-  res.json({ ok: true, facts: state.householdFacts });
+  const facts = await getAllFacts();
+  res.json({ ok: true, facts });
 });
 
-app.get("/facts", (_req, res) => {
-  res.json(state.householdFacts);
+app.get("/facts", async (_req, res) => {
+  res.json(await getAllFacts());
 });
 
-app.get("/nag-check", (_req, res) => {
-  const nags = checkNags(state);
+app.get("/nag-check", async (_req, res) => {
+  const nags = await checkNags();
   log("nag.check", { count: nags.length });
   res.json({ nags });
 });
@@ -457,7 +438,7 @@ async function bridgeSendKeyboard(
 }
 
 async function dispatchNags(): Promise<void> {
-  const nags = checkNags(state);
+  const nags = await checkNags();
   if (nags.length === 0) return;
   if (!NAG_CHAT_ID) {
     log("nag.skipped", { reason: "NAG_CHAT_ID not set" });
@@ -480,7 +461,6 @@ async function dispatchNags(): Promise<void> {
   }
 }
 
-// Nag every hour
 setInterval(() => {
   dispatchNags().catch((err) => log("nag.scheduler_error", { error: String(err) }));
 }, 60 * 60 * 1_000);
@@ -488,11 +468,11 @@ setInterval(() => {
 // ── Utility spike investigation ───────────────────────────────────────────────
 
 async function investigateUtilitySpike(billId: string, chatId: string): Promise<void> {
-  const bill = utilityBills.get(billId);
+  const { getUtilityBill: getBill, getUtilityAccount: getAccount } = await import("./db.js");
+  const bill = await getBill(billId);
   if (!bill || !process.env.BROWSERBASE_API_KEY) return;
 
-  const { utilityAccounts: accounts } = await import("./state.js");
-  const account = accounts.get(bill.accountId);
+  const account = await getAccount(bill.accountId);
   if (!account) return;
 
   try {
@@ -516,7 +496,6 @@ async function investigateUtilitySpike(billId: string, chatId: string): Promise<
     await stagehand.init();
     await stagehand.act(`navigate to ${account.loginUrl}`);
 
-    // Use agent primitive for multi-step portal navigation
     await stagehand.agent().execute(
       "navigate to the usage history or detailed breakdown for the current billing period. find the day-by-day or appliance usage data."
     );

@@ -1,6 +1,6 @@
-import { generateJson, LITE_MODEL } from "./gemini.js";
+import { generateJson, LITE_MODEL } from "./llm.js";
 import { JSON_ONLY, buildUtilitySystemPrompt } from "./prompts.js";
-import { serializeState } from "./state.js";
+import { buildSerializedState } from "./db.js";
 import { log } from "./log.js";
 
 export type MessageType =
@@ -57,13 +57,13 @@ Guidance:
 - "query": a direct question for hearth about household state
 - "maintenance": something broken, leaking, not working, or needing repair ("broken", "leaking", "clog", "no hot water", "heat isn't", "AC is", "mold", "crack", "weird smell", "flickering")
 - "calendar": a date + event pair (repair windows, guests, travel, package arrivals, lease dates, parties)
-- "banter": social chatter not aimed at hearth
-- "relevant": false only when hearth clearly has nothing to do or say (pure banter)
+- "banter": roommates talking among themselves — movies, gossip, jokes, plans they're handling on their own — not aimed at hearth and not about household logistics
+- "relevant": true for ANYTHING touching hearth's domains (money/expenses, groceries, chores, maintenance, calendar/scheduling, household facts) or any direct question or request for hearth. Lean true when a message is borderline but brushes a domain — hearth should chime in whenever it can actually help. Set false ONLY for pure social chatter where hearth has nothing useful to add (two roommates discussing a movie, riffing, venting).
 - "confidence": "high" only when you're sure`;
 
   const result = await generateJson<Classification>({
     model: LITE_MODEL,
-    systemInstruction: buildUtilitySystemPrompt("the message classifier", serializeState()),
+    systemInstruction: buildUtilitySystemPrompt("the message classifier", await buildSerializedState()),
     prompt,
   });
 

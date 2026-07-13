@@ -1,4 +1,14 @@
-import { HouseholdState, money, maintenanceIssues, houseEvents, moveEvents } from "./state.js";
+import { money } from "./state.js";
+import {
+  getMembers,
+  getAllBalances,
+  getGroceryItems,
+  getLedgerEntries,
+  getPendingItems,
+  getAllFacts,
+  getConfig,
+  getAllMoveEvents,
+} from "./db.js";
 import { getStalOpenIssues } from "./maintenance.js";
 import { getEventsWithin } from "./calendar.js";
 import { shouldSuggestDailyReorder, suggestReorder, markSuggestedItems } from "./reorder.js";
@@ -7,18 +17,29 @@ export interface NagMessage {
   target: string | "group";
   message: string;
   priority: "high" | "low";
-  /** Optional inline keyboard for this nag (keyboard-capable bridge endpoints). */
   keyboard?: Array<Array<{ text: string; callback_data: string }>>;
 }
 
-export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage[] {
+export async function checkNags(now: Date = new Date()): Promise<NagMessage[]> {
+  const [members, balances, openGroceries, ledger, pendingItems, facts, lastRun, moveEventsList] =
+    await Promise.all([
+      getMembers(),
+      getAllBalances(),
+      getGroceryItems(true),
+      getLedgerEntries(),
+      getPendingItems(true),
+      getAllFacts(),
+      getConfig("last_grocery_run"),
+      getAllMoveEvents(),
+    ]);
+
   const nags: NagMessage[] = [];
   const day = now.getDate();
 
   // ── Rule 1: Rent due ───────────────────────────────────────────────────────
   const nearRent = day <= 3 || day >= 29;
   if (nearRent) {
-    const debtors = s.members.filter((m) => (s.balances[m] ?? 0) < -0.005);
+    const debtors = members.filter((m) => (balances[m] ?? 0) < -0.005);
     if (debtors.length > 0) {
       const prefix =
         day >= 29
@@ -34,11 +55,11 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
   }
 
   // ── Rule 2: Stale debt ────────────────────────────────────────────────────
-  for (const member of s.members) {
-    const balance = s.balances[member] ?? 0;
+  for (const member of members) {
+    const balance = balances[member] ?? 0;
     if (balance >= -0.005) continue;
 
-    const theirDebts = s.ledger.filter(
+    const theirDebts = ledger.filter(
       (e) => e.split.includes(member) && e.payer !== member
     );
     if (theirDebts.length === 0) continue;
@@ -60,10 +81,9 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
   }
 
   // ── Rule 3: Grocery staleness ─────────────────────────────────────────────
-  const openGroceries = s.groceryList.filter((g) => !g.fulfilled);
   if (openGroceries.length >= 3) {
-    const daysSinceRun = s.lastGroceryRun
-      ? Math.floor((now.getTime() - Date.parse(s.lastGroceryRun)) / 86_400_000)
+    const daysSinceRun = lastRun
+      ? Math.floor((now.getTime() - Date.parse(lastRun)) / 86_400_000)
       : Infinity;
     if (daysSinceRun >= 4) {
       nags.push({
@@ -74,22 +94,8 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
     }
   }
 
-  // ── Rule 4: Overdue chores ────────────────────────────────────────────────
-  for (const chore of s.chores) {
-    if (chore.done || !chore.dueDate) continue;
-    const due = Date.parse(chore.dueDate);
-    if (!isNaN(due) && due < now.getTime()) {
-      nags.push({
-        target: chore.assignee,
-        message: `hey ${chore.assignee.toLowerCase()}, "${chore.task}" was due ${chore.dueDate} — still on it?`,
-        priority: "low",
-      });
-    }
-  }
-
   // ── Rule 5: Unresolved action items ───────────────────────────────────────
-  for (const item of s.pendingItems) {
-    if (item.resolved) continue;
+  for (const item of pendingItems) {
     const ageMs = now.getTime() - Date.parse(item.raisedAt);
     const ageHours = ageMs / 3_600_000;
 
@@ -115,8 +121,8 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
   }
 
   // ── Rule 6: Maintenance staleness (F1) ───────────────────────────────────
-  const nagDays = Number(s.householdFacts["maintenance_nag_days"] ?? 5);
-  const staleIssues = getStalOpenIssues(nagDays, now);
+  const nagDays = Number(facts["maintenance_nag_days"] ?? 5);
+  const staleIssues = await getStalOpenIssues(nagDays, now);
   for (const issue of staleIssues) {
     const daysOpen = Math.floor(
       (now.getTime() - Date.parse(issue.firstSeenAt)) / 86_400_000
@@ -133,15 +139,16 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
   }
 
   // ── Rule 7: Calendar reminders (F2) ──────────────────────────────────────
-  // 24h reminder for whole-house events
-  const in24h = getEventsWithin(24, now);
-  const in1h = getEventsWithin(1, now);
+  const [in24h, in1h] = await Promise.all([
+    getEventsWithin(24, now),
+    getEventsWithin(1, now),
+  ]);
 
   const alreadyIn1h = new Set(in1h.map((e) => e.id));
 
   for (const event of in24h) {
-    if (alreadyIn1h.has(event.id)) continue; // 1h nag takes priority
-    if (event.affectsMembers.length > 0) continue; // only whole-house events for 24h nag
+    if (alreadyIn1h.has(event.id)) continue;
+    if (event.affectsMembers.length > 0) continue;
     const timeHint = event.eventTime ? ` at ${event.eventTime}` : "";
     nags.push({
       target: "group",
@@ -151,7 +158,6 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
   }
 
   for (const event of in1h) {
-    // 1h reminder for repair windows — ping whoever should be home
     if (event.eventType === "repair") {
       const who =
         event.affectsMembers.length > 0
@@ -173,11 +179,9 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
   }
 
   // Lease end reminder
-  const leaseEnd = s.householdFacts["lease_end"];
+  const leaseEnd = facts["lease_end"];
   if (leaseEnd) {
-    const daysUntil = Math.floor(
-      (Date.parse(leaseEnd) - now.getTime()) / 86_400_000
-    );
+    const daysUntil = Math.floor((Date.parse(leaseEnd) - now.getTime()) / 86_400_000);
     if (daysUntil === 7) {
       nags.push({
         target: "group",
@@ -189,8 +193,8 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
 
   // ── Rule 8: Daily reorder check at 9am (F3) ───────────────────────────────
   if (now.getHours() === 9 && now.getMinutes() < 60) {
-    if (shouldSuggestDailyReorder()) {
-      const result = suggestReorder({ triggered_by: "scheduled" });
+    if (await shouldSuggestDailyReorder()) {
+      const result = await suggestReorder({ triggered_by: "scheduled" });
       if (result.suggestions.length >= 2) {
         markSuggestedItems(result.suggestions.map((s) => s.itemName));
         nags.push({
@@ -204,7 +208,7 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
   }
 
   // ── Rule 9: Move event stall check (F5) ──────────────────────────────────
-  for (const move of moveEvents.values()) {
+  for (const move of moveEventsList) {
     if (move.phase === "completed") continue;
     const daysStalled = Math.floor(
       (now.getTime() - Date.parse(move.updatedAt)) / 86_400_000

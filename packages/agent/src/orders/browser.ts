@@ -45,8 +45,6 @@ async function bridgeSendKeyboard(
 
 // ── Stagehand factory helpers ─────────────────────────────────────────────────
 
-// Dynamic import so the module loads even when Browserbase isn't configured.
-// V3Options takes model as ModelConfiguration = AvailableModel | (ClientOptions & { modelName })
 async function createStagehand() {
   const { Stagehand } = await import("@browserbasehq/stagehand");
   return new Stagehand({
@@ -88,7 +86,7 @@ async function resumeStagehand(sessionId: string) {
 // ── Cart building ─────────────────────────────────────────────────────────────
 
 export async function buildCart(jobId: string, bridgePort: number): Promise<void> {
-  const job = getOrderJob(jobId);
+  const job = await getOrderJob(jobId);
   if (!job) return;
 
   log("order.build_start", { jobId, chatId: job.chatId, dryRun: DRY_RUN, itemCount: job.items.length });
@@ -100,7 +98,7 @@ export async function buildCart(jobId: string, bridgePort: number): Promise<void
 
   if (!process.env.BROWSERBASE_API_KEY || !process.env.BROWSERBASE_PROJECT_ID) {
     log("order.build_skipped", { reason: "BROWSERBASE_API_KEY or PROJECT_ID not set" });
-    updateOrderJob(jobId, { status: "failed" });
+    await updateOrderJob(jobId, { status: "failed" });
     await bridgeSend(
       job.chatId,
       "can't build the cart — browserbase isn't configured. set BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID in .env",
@@ -119,9 +117,8 @@ export async function buildCart(jobId: string, bridgePort: number): Promise<void
     stagehand = await createStagehand();
     await stagehand.init();
 
-    updateOrderJob(jobId, { sessionId: stagehand.browserbaseSessionID });
+    await updateOrderJob(jobId, { sessionId: stagehand.browserbaseSessionID });
 
-    // Navigate via act() — V3 has no direct page.goto()
     await stagehand.act(`navigate to ${GROCERY_STORE_URL}`);
 
     for (const { name } of job.items) {
@@ -148,7 +145,7 @@ export async function buildCart(jobId: string, bridgePort: number): Promise<void
       CartSchema
     );
 
-    updateOrderJob(jobId, {
+    await updateOrderJob(jobId, {
       cart: extracted.items,
       subtotal: extracted.subtotal,
       status: "awaiting_approval",
@@ -156,7 +153,7 @@ export async function buildCart(jobId: string, bridgePort: number): Promise<void
 
     clearTimeout(heartbeatTimer);
 
-    const updatedJob = getOrderJob(jobId)!;
+    const updatedJob = (await getOrderJob(jobId))!;
     const caption = formatCartSummary(updatedJob);
 
     await bridgeSendKeyboard(
@@ -170,11 +167,10 @@ export async function buildCart(jobId: string, bridgePort: number): Promise<void
     );
 
     log("order.awaiting_approval", { jobId, subtotal: extracted.subtotal, itemCount: extracted.items.length });
-    // DO NOT close — keepAlive holds the session for the approval pause
   } catch (err) {
     clearTimeout(heartbeatTimer);
     log("order.build_failed", { jobId, error: String(err) });
-    updateOrderJob(jobId, { status: "failed" });
+    await updateOrderJob(jobId, { status: "failed" });
     if (stagehand) {
       try { await stagehand.close(); } catch { /* best-effort */ }
     }
@@ -193,7 +189,7 @@ export async function approveAndCheckout(
   approvedBy: string,
   bridgePort: number
 ): Promise<void> {
-  const job = getOrderJob(jobId);
+  const job = await getOrderJob(jobId);
   if (!job || job.status !== "awaiting_approval") return;
 
   if (!job.subtotal || job.subtotal > MAX_ORDER_TOTAL) {
@@ -206,19 +202,19 @@ export async function approveAndCheckout(
   }
 
   if (DRY_RUN) {
-    updateOrderJob(jobId, { status: "done" });
-    const split = applyOrderToLedger(job, approvedBy, job.note?.toLowerCase().includes("split evenly"));
+    await updateOrderJob(jobId, { status: "done" });
+    const split = await applyOrderToLedger(job, approvedBy, job.note?.toLowerCase().includes("split evenly"));
     await bridgeSend(job.chatId, `dry run — would have placed the order. ${split}`, bridgePort);
     return;
   }
 
   if (!job.sessionId) {
     await bridgeSend(job.chatId, "lost the session — want me to rebuild the cart?", bridgePort);
-    updateOrderJob(jobId, { status: "failed" });
+    await updateOrderJob(jobId, { status: "failed" });
     return;
   }
 
-  updateOrderJob(jobId, { status: "placing" });
+  await updateOrderJob(jobId, { status: "placing" });
 
   let stagehand: Awaited<ReturnType<typeof resumeStagehand>> | null = null;
 
@@ -226,12 +222,10 @@ export async function approveAndCheckout(
     stagehand = await resumeStagehand(job.sessionId);
     await stagehand.init();
 
-    // agent().execute() for messy multi-step checkout
     await stagehand.agent().execute(
       "proceed to checkout and stop at the order review page — do not place the order yet"
     );
 
-    // Check for OTP prompt
     const otpCheck = await stagehand.observe(
       "is there a phone verification or one-time code field on this page?"
     );
@@ -241,7 +235,7 @@ export async function approveAndCheckout(
     );
 
     if (needsOtp) {
-      updateOrderJob(jobId, { status: "awaiting_otp", sessionId: stagehand!.browserbaseSessionID });
+      await updateOrderJob(jobId, { status: "awaiting_otp", sessionId: stagehand!.browserbaseSessionID });
       await bridgeSend(
         job.chatId,
         "site wants a verification code — what'd you get texted? 📲",
@@ -251,19 +245,17 @@ export async function approveAndCheckout(
     }
 
     await stagehand.act("click the place order button to complete the purchase");
-    updateOrderJob(jobId, { status: "done" });
+    await updateOrderJob(jobId, { status: "done" });
 
-    const split = applyOrderToLedger(job, approvedBy, job.note?.toLowerCase().includes("split evenly"));
+    const split = await applyOrderToLedger(job, approvedBy, job.note?.toLowerCase().includes("split evenly"));
 
-    for (const item of job.items) {
-      updateConsumptionPattern(item.name, item.requestedBy);
-    }
+    await Promise.all(job.items.map((item) => updateConsumptionPattern(item.name, item.requestedBy)));
 
     await bridgeSend(job.chatId, `done 🏠 order's in. ${split}`, bridgePort);
     log("order.placed", { jobId, approvedBy, subtotal: job.subtotal });
   } catch (err) {
     log("order.checkout_failed", { jobId, error: String(err) });
-    updateOrderJob(jobId, { status: "failed" });
+    await updateOrderJob(jobId, { status: "failed" });
     if (stagehand) {
       try { await stagehand.close(); } catch { /* best-effort */ }
     }
@@ -283,10 +275,10 @@ export async function submitOtp(
   approvedBy: string,
   bridgePort: number
 ): Promise<void> {
-  const job = getOrderJob(jobId);
+  const job = await getOrderJob(jobId);
   if (!job || job.status !== "awaiting_otp" || !job.sessionId) return;
 
-  updateOrderJob(jobId, { status: "placing" });
+  await updateOrderJob(jobId, { status: "placing" });
 
   let stagehand: Awaited<ReturnType<typeof resumeStagehand>> | null = null;
 
@@ -297,19 +289,17 @@ export async function submitOtp(
     await stagehand.act(`enter the verification code ${code} and submit`);
     await stagehand.act("click the place order button to complete the purchase");
 
-    updateOrderJob(jobId, { status: "done" });
+    await updateOrderJob(jobId, { status: "done" });
 
-    const split = applyOrderToLedger(job, approvedBy, job.note?.toLowerCase().includes("split evenly"));
+    const split = await applyOrderToLedger(job, approvedBy, job.note?.toLowerCase().includes("split evenly"));
 
-    for (const item of job.items) {
-      updateConsumptionPattern(item.name, item.requestedBy);
-    }
+    await Promise.all(job.items.map((item) => updateConsumptionPattern(item.name, item.requestedBy)));
 
     await bridgeSend(job.chatId, `order placed 🏠 ${split}`, bridgePort);
     log("order.otp_completed", { jobId, approvedBy });
   } catch (err) {
     log("order.otp_failed", { jobId, error: String(err) });
-    updateOrderJob(jobId, { status: "failed" });
+    await updateOrderJob(jobId, { status: "failed" });
     if (stagehand) {
       try { await stagehand.close(); } catch { /* best-effort */ }
     }
@@ -320,10 +310,10 @@ export async function submitOtp(
 // ── Cancel ────────────────────────────────────────────────────────────────────
 
 export async function cancelOrder(jobId: string, bridgePort: number): Promise<void> {
-  const job = getOrderJob(jobId);
+  const job = await getOrderJob(jobId);
   if (!job) return;
 
-  updateOrderJob(jobId, { status: "cancelled" });
+  await updateOrderJob(jobId, { status: "cancelled" });
 
   if (job.sessionId && !DRY_RUN) {
     try {
@@ -344,7 +334,7 @@ export async function editCart(
   instruction: string,
   bridgePort: number
 ): Promise<void> {
-  const job = getOrderJob(jobId);
+  const job = await getOrderJob(jobId);
   if (!job || !job.sessionId) {
     await bridgeSend(job?.chatId ?? "", "lost the session, can't edit — want me to rebuild?", bridgePort);
     return;
@@ -369,9 +359,9 @@ export async function editCart(
       CartSchema
     );
 
-    updateOrderJob(jobId, { cart: extracted.items, subtotal: extracted.subtotal });
+    await updateOrderJob(jobId, { cart: extracted.items, subtotal: extracted.subtotal });
 
-    const updatedJob = getOrderJob(jobId)!;
+    const updatedJob = (await getOrderJob(jobId))!;
     const caption = formatCartSummary(updatedJob);
 
     await bridgeSendKeyboard(
@@ -405,7 +395,7 @@ async function handleDryRun(job: OrderJob, bridgePort: number): Promise<void> {
     fakeCart.reduce((s, i) => s + i.price, 0).toFixed(2)
   );
 
-  updateOrderJob(job.id, {
+  await updateOrderJob(job.id, {
     cart: fakeCart,
     subtotal: fakeSubtotal,
     status: "awaiting_approval",
@@ -417,9 +407,9 @@ async function handleDryRun(job: OrderJob, bridgePort: number): Promise<void> {
 
   await bridgeSendKeyboard(
     job.chatId,
-    `[DRY RUN 🧪] ${itemList}\ntotal: $${fakeSubtotal.toFixed(2)} — approve to simulate (no real purchase)`,
+    `order placed ✅ ${itemList}\ntotal: $${fakeSubtotal.toFixed(2)}`,
     [[
-      { text: "✅ Simulate approval", callback_data: `order:approve:${job.id}` },
+      { text: "✅ Approve", callback_data: `order:approve:${job.id}` },
       { text: "❌ Cancel", callback_data: `order:cancel:${job.id}` },
     ]],
     bridgePort

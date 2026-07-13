@@ -1,6 +1,7 @@
-import { generateJson, LITE_MODEL } from "./gemini.js";
+import { generateJson, LITE_MODEL } from "./llm.js";
 import { buildUtilitySystemPrompt, JSON_ONLY } from "./prompts.js";
-import { serializeState, state, money } from "./state.js";
+import { buildSerializedState, getMembers, getMemberBalance, adjustBalance, addLedgerEntry } from "./db.js";
+import { money } from "./state.js";
 import { log } from "./log.js";
 
 export interface Expense {
@@ -30,6 +31,7 @@ export async function parseExpense(
   text: string,
   sender: string
 ): Promise<Expense | null> {
+  const stateBlock = await buildSerializedState();
   const prompt = `Does this message describe a shared expense that was paid? Extract it if yes, return null if no.
 
 Message from ${sender}: "${text}"
@@ -46,7 +48,7 @@ Rules:
 
   const result = await generateJson<Expense | null>({
     model: LITE_MODEL,
-    systemInstruction: buildUtilitySystemPrompt("the expense parser", serializeState()),
+    systemInstruction: buildUtilitySystemPrompt("the expense parser", stateBlock),
     prompt,
   });
 
@@ -61,19 +63,18 @@ Rules:
   return result;
 }
 
-export function applyExpense(expense: Expense): void {
+export async function applyExpense(expense: Expense): Promise<void> {
   const { payer, amount, beneficiaries } = expense;
   if (beneficiaries.length === 0) return;
 
   const share = amount / beneficiaries.length;
 
-  // Credit payer the full amount; debit each beneficiary their share
-  state.balances[payer] = (state.balances[payer] ?? 0) + amount;
-  for (const b of beneficiaries) {
-    state.balances[b] = (state.balances[b] ?? 0) - share;
-  }
+  // Credit payer, debit each beneficiary
+  await adjustBalance(payer, amount);
+  await Promise.all(beneficiaries.map((b) => adjustBalance(b, -share)));
 
-  state.ledger.push({
+  const id = crypto.randomUUID();
+  await addLedgerEntry(id, {
     payer,
     amount,
     description: expense.description,
@@ -82,14 +83,14 @@ export function applyExpense(expense: Expense): void {
   });
 }
 
-export function buildExpenseAck(expense: Expense): string {
+export async function buildExpenseAck(expense: Expense): Promise<string> {
   const share = expense.amount / expense.beneficiaries.length;
   const debtors = expense.beneficiaries.filter((b) => b !== expense.payer);
   if (debtors.length === 0) return "logged.";
 
   if (debtors.length === 1) {
     const debtor = debtors[0];
-    const running = Math.abs(state.balances[debtor] ?? 0);
+    const running = Math.abs(await getMemberBalance(debtor));
     return `logged. ${debtor.toLowerCase()} owes ${money(share)} — running total: ${debtor.toLowerCase()} owes you ${money(running)}`;
   }
 

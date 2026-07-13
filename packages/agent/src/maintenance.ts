@@ -1,12 +1,14 @@
 import {
-  maintenanceIssues,
-  state,
-  type MaintenanceIssue,
-  type MaintenancePriority,
-} from "./state.js";
-import { generateText, MAIN_MODEL } from "./gemini.js";
+  getMaintenanceIssues,
+  getMaintenanceIssue,
+  addMaintenanceIssue,
+  patchMaintenanceIssue,
+  getAllFacts,
+  buildSerializedState,
+} from "./db.js";
+import type { MaintenanceIssue, MaintenancePriority } from "./state.js";
+import { generateText, MAIN_MODEL } from "./llm.js";
 import { buildChatSystemPrompt, findBannedWord } from "./prompts.js";
-import { serializeState } from "./state.js";
 import { log } from "./log.js";
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
@@ -19,19 +21,24 @@ interface LogMaintenanceArgs {
 }
 
 /** Insert a new maintenance issue. Returns the keyboard-ready response. */
-export function logMaintenanceIssue(args: LogMaintenanceArgs): {
+export async function logMaintenanceIssue(args: LogMaintenanceArgs): Promise<{
   issueId: string;
   message: string;
   keyboard: Array<Array<{ text: string; callback_data: string }>>;
-} {
-  const id = `maint_${Date.now()}`;
+}> {
+  const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
   // Deduplicate: check for a very similar open issue
-  const existing = findSimilarIssue(args.description);
+  const existing = await findSimilarIssue(args.description);
   if (existing) {
-    existing.lastUpdatedAt = now;
-    if (args.photo_url) existing.photoUrls.push(args.photo_url);
+    const photoUrls = args.photo_url
+      ? [...existing.photoUrls, args.photo_url]
+      : existing.photoUrls;
+    await patchMaintenanceIssue(existing.id, {
+      lastUpdatedAt: now,
+      photoUrls,
+    });
     log("maintenance.deduped", { existingId: existing.id, description: args.description });
     return {
       issueId: existing.id,
@@ -51,7 +58,7 @@ export function logMaintenanceIssue(args: LogMaintenanceArgs): {
     photoUrls: args.photo_url ? [args.photo_url] : [],
   };
 
-  maintenanceIssues.set(id, issue);
+  await addMaintenanceIssue(issue);
   log("maintenance.logged", { id, description: args.description, priority: args.priority, reportedBy: args.reported_by });
 
   const priorityEmoji = { low: "🔧", medium: "🔧", urgent: "🚨" }[args.priority];
@@ -75,9 +82,10 @@ function buildMaintenanceKeyboard(
 }
 
 /** Loose similarity check: does the description share key words with an open issue? */
-function findSimilarIssue(description: string): MaintenanceIssue | undefined {
+async function findSimilarIssue(description: string): Promise<MaintenanceIssue | undefined> {
   const words = description.toLowerCase().split(/\W+/).filter((w) => w.length > 3);
-  for (const issue of maintenanceIssues.values()) {
+  const openIssues = await getMaintenanceIssues();
+  for (const issue of openIssues) {
     if (issue.status === "resolved") continue;
     const issueWords = issue.description.toLowerCase();
     const matches = words.filter((w) => issueWords.includes(w));
@@ -95,19 +103,20 @@ interface DraftLandlordArgs {
 export async function draftLandlordMessage(
   args: DraftLandlordArgs
 ): Promise<{ message: string; draft: string; keyboard: Array<Array<{ text: string; callback_data: string }>> }> {
-  const issue = maintenanceIssues.get(args.issue_id);
+  const issue = await getMaintenanceIssue(args.issue_id);
   if (!issue) {
     return { message: "couldn't find that issue", draft: "", keyboard: [] };
   }
 
-  const facts = state.householdFacts;
+  const facts = await getAllFacts();
   const landlordName = facts["landlord_name"] ?? "Landlord";
   const unit = facts["unit_number"] ?? "";
   const address = facts["property_address"] ?? "";
   const leaseRef = facts["lease_reference"] ?? "";
 
   // Prior reports of the same issue
-  const priorReports = [...maintenanceIssues.values()].filter(
+  const allIssues = await getMaintenanceIssues();
+  const priorReports = allIssues.filter(
     (i) =>
       i.id !== issue.id &&
       i.description.toLowerCase().split(/\W+/).some((w) =>
@@ -122,6 +131,7 @@ export async function draftLandlordMessage(
           .join(", ")}. This is a recurring problem.`
       : "";
 
+  const stateBlock = await buildSerializedState();
   const prompt = `Draft a professional, firm but polite maintenance request message to the landlord.
 
 Issue: ${issue.description}
@@ -137,17 +147,15 @@ Landlord name: ${landlordName}
 
 Write a concise message (3-5 sentences) requesting timely repair. Professional, not aggressive. No fluff.`;
 
-  let draft = await generateText({
+  const draft = await generateText({
     model: MAIN_MODEL,
-    systemInstruction: buildChatSystemPrompt(serializeState()),
+    systemInstruction: buildChatSystemPrompt(stateBlock),
     prompt,
   });
 
-  // Tone check
   const banned = findBannedWord(draft);
   if (banned) log("maintenance.draft_tone_violation", { banned });
 
-  // Prefix and suffix to clearly mark it as a draft
   const landlordTelegram = facts["landlord_telegram"];
   const canSend = !!landlordTelegram && process.env.LANDLORD_MESSAGE_ENABLED === "true";
 
@@ -163,47 +171,47 @@ Write a concise message (3-5 sentences) requesting timely repair. Professional, 
 
   log("maintenance.draft_created", { issueId: issue.id, canSend });
 
-  return {
-    message: `draft ready (${sendNote}):`,
-    draft,
-    keyboard,
-  };
+  return { message: `draft ready (${sendNote}):`, draft, keyboard };
 }
 
 // ── Status updates ────────────────────────────────────────────────────────────
 
-export function resolveIssue(issueId: string, resolvedBy: string): string {
-  const issue = maintenanceIssues.get(issueId);
+export async function resolveIssue(issueId: string, resolvedBy: string): Promise<string> {
+  const issue = await getMaintenanceIssue(issueId);
   if (!issue) return "issue not found";
-  issue.status = "resolved";
-  issue.resolutionNotes = `marked resolved by ${resolvedBy}`;
-  issue.lastUpdatedAt = new Date().toISOString();
+  await patchMaintenanceIssue(issueId, {
+    status: "resolved",
+    resolutionNotes: `marked resolved by ${resolvedBy}`,
+    lastUpdatedAt: new Date().toISOString(),
+  });
   log("maintenance.resolved", { issueId, resolvedBy });
   return `got it — "${issue.description}" marked resolved ✓`;
 }
 
-export function markLandlordNotified(issueId: string): void {
-  const issue = maintenanceIssues.get(issueId);
-  if (!issue) return;
-  issue.status = "landlord_notified";
-  issue.landlordNotifiedAt = new Date().toISOString();
-  issue.lastUpdatedAt = new Date().toISOString();
+export async function markLandlordNotified(issueId: string): Promise<void> {
+  const now = new Date().toISOString();
+  await patchMaintenanceIssue(issueId, {
+    status: "landlord_notified",
+    landlordNotifiedAt: now,
+    lastUpdatedAt: now,
+  });
 }
 
 /** Returns all open issues older than N days. Used by the nag engine. */
-export function getStalOpenIssues(olderThanDays: number, now: Date = new Date()): MaintenanceIssue[] {
+export async function getStalOpenIssues(
+  olderThanDays: number,
+  now: Date = new Date()
+): Promise<MaintenanceIssue[]> {
   const cutoff = olderThanDays * 86_400_000;
-  return [...maintenanceIssues.values()].filter(
-    (i) =>
-      i.status === "open" &&
-      now.getTime() - Date.parse(i.firstSeenAt) > cutoff
+  const openIssues = await getMaintenanceIssues("open");
+  return openIssues.filter(
+    (i) => now.getTime() - Date.parse(i.firstSeenAt) > cutoff
   );
 }
 
-export function getIssue(id: string): MaintenanceIssue | undefined {
-  return maintenanceIssues.get(id);
-}
+export { getMaintenanceIssue as getIssue };
 
-export function getAllOpenIssues(): MaintenanceIssue[] {
-  return [...maintenanceIssues.values()].filter((i) => i.status !== "resolved");
+export async function getAllOpenIssues(): Promise<MaintenanceIssue[]> {
+  const all = await getMaintenanceIssues();
+  return all.filter((i) => i.status !== "resolved");
 }

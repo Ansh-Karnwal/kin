@@ -1,6 +1,14 @@
-import { generateJson, LITE_MODEL } from "./gemini.js";
+import { generateJson, LITE_MODEL } from "./llm.js";
 import { buildUtilitySystemPrompt, JSON_ONLY } from "./prompts.js";
-import { serializeState, state } from "./state.js";
+import { buildSerializedState } from "./db.js";
+import {
+  getGroceryItems,
+  addGroceryItem,
+  fulfillGroceryItem,
+  removeGroceryItem,
+  deleteAllFulfilledGrocery,
+  setConfig,
+} from "./db.js";
 import { log } from "./log.js";
 
 export type GroceryAction = "add" | "remove" | "fulfill" | "query";
@@ -29,6 +37,7 @@ export async function parseGroceryIntent(
   text: string,
   sender: string
 ): Promise<GroceryIntent | null> {
+  const stateBlock = await buildSerializedState();
   const prompt = `Does this message change or ask about the shared grocery list? Extract the intent if yes, return null if no.
 
 Message from ${sender}: "${text}"
@@ -48,7 +57,7 @@ Rules:
 
   const result = await generateJson<GroceryIntent | null>({
     model: LITE_MODEL,
-    systemInstruction: buildUtilitySystemPrompt("the grocery list parser", serializeState()),
+    systemInstruction: buildUtilitySystemPrompt("the grocery list parser", stateBlock),
     prompt,
   });
 
@@ -62,10 +71,6 @@ Rules:
   return result;
 }
 
-function openItems() {
-  return state.groceryList.filter((g) => !g.fulfilled);
-}
-
 /** Case-insensitive loose match: "milk" matches "oat milk" and vice versa. */
 function matchesItem(listed: string, wanted: string): boolean {
   const a = listed.toLowerCase();
@@ -73,29 +78,25 @@ function matchesItem(listed: string, wanted: string): boolean {
   return a.includes(b) || b.includes(a);
 }
 
-/** Apply a parsed intent to state and return Hearth's terse confirmation. */
-export function applyGroceryIntent(intent: GroceryIntent): string {
+/** Apply a parsed intent to the DB and return Hearth's terse confirmation. */
+export async function applyGroceryIntent(intent: GroceryIntent): Promise<string> {
   switch (intent.action) {
     case "add": {
+      const current = await getGroceryItems(true);
       const added: string[] = [];
       const dupes: string[] = [];
       for (const item of intent.items) {
         const name = item.toLowerCase().trim();
         if (!name) continue;
-        if (openItems().some((g) => matchesItem(g.item, name))) {
+        if (current.some((g) => matchesItem(g.item, name))) {
           dupes.push(name);
           continue;
         }
-        state.groceryList.push({
-          item: name,
-          requestedBy: intent.requestedBy,
-          addedAt: new Date().toISOString(),
-          fulfilled: false,
-        });
+        const id = crypto.randomUUID();
+        await addGroceryItem(id, name, intent.requestedBy);
         added.push(name);
       }
-      if (added.length === 0 && dupes.length > 0)
-        return `${dupes.join(" + ")} already on there`;
+      if (added.length === 0 && dupes.length > 0) return `${dupes.join(" + ")} already on there`;
       if (added.length === 0) return "nothing to add?";
       const ack = `added ${added.join(" + ")} 🛒`;
       return dupes.length > 0 ? `${ack} (${dupes.join(" + ")} already on there)` : ack;
@@ -103,23 +104,23 @@ export function applyGroceryIntent(intent: GroceryIntent): string {
 
     case "fulfill":
     case "remove": {
+      const current = await getGroceryItems(true);
       const hit: string[] = [];
       const miss: string[] = [];
       for (const item of intent.items) {
-        const target = openItems().find((g) => matchesItem(g.item, item));
+        const target = current.find((g) => matchesItem(g.item, item));
         if (!target) {
           miss.push(item.toLowerCase());
           continue;
         }
         if (intent.action === "fulfill") {
-          target.fulfilled = true;
+          await fulfillGroceryItem(target.id);
         } else {
-          state.groceryList.splice(state.groceryList.indexOf(target), 1);
+          await removeGroceryItem(target.id);
         }
         hit.push(target.item);
       }
-      if (hit.length === 0)
-        return `didn't see ${miss.join(" or ") || "that"} on the list`;
+      if (hit.length === 0) return `didn't see ${miss.join(" or ") || "that"} on the list`;
       const verb = intent.action === "fulfill" ? "crossed off" : "took off";
       const ack = `${verb} ${hit.join(" + ")} 👍`;
       return miss.length > 0 ? `${ack} (no ${miss.join(" or ")} on there tho)` : ack;
@@ -130,8 +131,8 @@ export function applyGroceryIntent(intent: GroceryIntent): string {
   }
 }
 
-export function formatGroceryList(): string {
-  const items = openItems();
+export async function formatGroceryList(): Promise<string> {
+  const items = await getGroceryItems(true);
   if (items.length === 0) return "list's empty, we're good 🧾";
   const lines = items.map(
     (g) => `— ${g.item.toLowerCase()} (${g.requestedBy.toLowerCase()})`
@@ -146,16 +147,17 @@ export function matchCompileCommand(text: string): CompileCommand | null {
   const t = text.toLowerCase();
   if (/\b(do|doing|do(in'?)?)\s+the\s+grocery\s+run\b/.test(t)) return "run";
   if (t.includes("compile the list")) return "compile";
-  if (t.includes("what's on the list") || t.includes("whats on the list"))
-    return "compile";
+  if (t.includes("what's on the list") || t.includes("whats on the list")) return "compile";
   return null;
 }
 
-/** Marks the run as done: stamps lastGroceryRun and clears fulfilled items. */
-export function doGroceryRun(now: Date = new Date()): string {
-  const reply = formatGroceryList();
-  state.lastGroceryRun = now.toISOString();
-  state.groceryList = state.groceryList.filter((g) => !g.fulfilled);
-  log("grocery.run", { remaining: state.groceryList.length });
+/** Marks the run as done: stamps lastGroceryRun and removes fulfilled items. */
+export async function doGroceryRun(now: Date = new Date()): Promise<string> {
+  const reply = await formatGroceryList();
+  await Promise.all([
+    setConfig("last_grocery_run", now.toISOString()),
+    deleteAllFulfilledGrocery(),
+  ]);
+  log("grocery.run", {});
   return reply;
 }

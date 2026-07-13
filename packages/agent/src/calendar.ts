@@ -1,4 +1,5 @@
-import { houseEvents, type HouseEvent, type HouseEventType } from "./state.js";
+import { getHouseEvents, addHouseEvent as addHouseEventDb } from "./db.js";
+import type { HouseEvent, HouseEventType } from "./state.js";
 import { log } from "./log.js";
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
@@ -15,8 +16,8 @@ interface AddHouseEventArgs {
   created_by: string;
 }
 
-export function addHouseEvent(args: AddHouseEventArgs): { eventId: string; message: string } {
-  const id = `evt_${Date.now()}`;
+export async function addHouseEvent(args: AddHouseEventArgs): Promise<{ eventId: string; message: string }> {
+  const id = crypto.randomUUID();
   const event: HouseEvent = {
     id,
     title: args.title,
@@ -31,7 +32,7 @@ export function addHouseEvent(args: AddHouseEventArgs): { eventId: string; messa
     createdAt: new Date().toISOString(),
   };
 
-  houseEvents.set(id, event);
+  await addHouseEventDb(event);
   log("calendar.event_added", {
     id,
     title: event.title,
@@ -47,7 +48,7 @@ export function addHouseEvent(args: AddHouseEventArgs): { eventId: string; messa
 
   const timeHint = event.eventTime ? ` at ${event.eventTime}` : "";
   const durHint =
-    event.durationMinutes ? ` for ${Math.round(event.durationMinutes / 60 * 10) / 10}h` : "";
+    event.durationMinutes ? ` for ${Math.round((event.durationMinutes / 60) * 10) / 10}h` : "";
 
   return {
     eventId: id,
@@ -61,17 +62,14 @@ interface GetCalendarArgs {
   days?: number;
 }
 
-export function getHouseCalendar(args: GetCalendarArgs = {}): string {
+export async function getHouseCalendar(args: GetCalendarArgs = {}): Promise<string> {
   const days = args.days ?? 7;
   const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
   const cutoff = new Date(now.getTime() + days * 86_400_000);
 
-  const upcoming = [...houseEvents.values()]
-    .filter((e) => {
-      const d = new Date(e.eventDate);
-      return d >= now && d <= cutoff;
-    })
-    .sort((a, b) => a.eventDate.localeCompare(b.eventDate));
+  const allEvents = await getHouseEvents(todayStr);
+  const upcoming = allEvents.filter((e) => new Date(e.eventDate) <= cutoff);
 
   if (upcoming.length === 0) {
     return `nothing on the calendar for the next ${days} days 📅`;
@@ -95,7 +93,7 @@ export function getHouseCalendar(args: GetCalendarArgs = {}): string {
 }
 
 function formatDayLabel(dateStr: string, now: Date): string {
-  const d = new Date(dateStr + "T12:00:00"); // noon to avoid UTC offset issues
+  const d = new Date(dateStr + "T12:00:00");
   const diffDays = Math.round((d.getTime() - now.setHours(0, 0, 0, 0)) / 86_400_000);
   if (diffDays === 0) return "today    ";
   if (diffDays === 1) return "tomorrow ";
@@ -125,17 +123,16 @@ export interface CalendarConflict {
   affectsMembers: string[];
 }
 
-export function checkCalendarConflicts(args: CheckConflictsArgs): CalendarConflict[] {
+export async function checkCalendarConflicts(args: CheckConflictsArgs): Promise<CalendarConflict[]> {
+  const allEvents = await getHouseEvents();
   const conflicts: CalendarConflict[] = [];
-  const proposedStart = args.event_time
-    ? toMinutes(args.event_time)
-    : null;
+  const proposedStart = args.event_time ? toMinutes(args.event_time) : null;
   const proposedEnd =
     proposedStart !== null && args.duration_minutes
       ? proposedStart + args.duration_minutes
       : proposedStart;
 
-  for (const event of houseEvents.values()) {
+  for (const event of allEvents) {
     if (event.eventDate !== args.event_date) continue;
 
     const eventStart = event.eventTime ? toMinutes(event.eventTime) : null;
@@ -144,20 +141,16 @@ export function checkCalendarConflicts(args: CheckConflictsArgs): CalendarConfli
         ? eventStart + event.durationMinutes
         : eventStart;
 
-    // Check member overlap
     const memberOverlap =
       args.affects_members && args.affects_members.length > 0
-        ? event.affectsMembers.length === 0 || // whole-house event conflicts with anyone
+        ? event.affectsMembers.length === 0 ||
           args.affects_members.some(
-            (m) =>
-              event.affectsMembers.length === 0 ||
-              event.affectsMembers.includes(m)
+            (m) => event.affectsMembers.length === 0 || event.affectsMembers.includes(m)
           )
         : true;
 
     if (!memberOverlap) continue;
 
-    // Time overlap (only when both have explicit times)
     if (
       proposedStart !== null &&
       eventStart !== null &&
@@ -188,9 +181,11 @@ function toMinutes(time: string): number {
 // ── Nag helpers ───────────────────────────────────────────────────────────────
 
 /** Events starting within N hours. Used by the nag engine. */
-export function getEventsWithin(hours: number, now: Date = new Date()): HouseEvent[] {
+export async function getEventsWithin(hours: number, now: Date = new Date()): Promise<HouseEvent[]> {
   const cutoffMs = now.getTime() + hours * 3_600_000;
-  return [...houseEvents.values()].filter((e) => {
+  const todayStr = now.toISOString().slice(0, 10);
+  const allEvents = await getHouseEvents(todayStr);
+  return allEvents.filter((e) => {
     const eventMs = new Date(
       e.eventTime ? `${e.eventDate}T${e.eventTime}` : `${e.eventDate}T00:00:00`
     ).getTime();
@@ -199,6 +194,7 @@ export function getEventsWithin(hours: number, now: Date = new Date()): HouseEve
 }
 
 /** Events exactly on a given date (YYYY-MM-DD). */
-export function getEventsOnDate(date: string): HouseEvent[] {
-  return [...houseEvents.values()].filter((e) => e.eventDate === date);
+export async function getEventsOnDate(date: string): Promise<HouseEvent[]> {
+  const allEvents = await getHouseEvents(date);
+  return allEvents.filter((e) => e.eventDate === date);
 }
