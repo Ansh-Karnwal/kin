@@ -2,6 +2,7 @@ export interface GroceryItem {
   item: string;
   requestedBy: string;
   addedAt: string;
+  fulfilled: boolean; // bought but not yet cleared by a grocery run
 }
 
 export interface LedgerEntry {
@@ -62,10 +63,11 @@ export function serializeState(s: HouseholdState = state, now: Date = new Date()
   const balances = s.members.map((m) => describeBalance(m, s.balances[m] ?? 0));
   lines.push(`Balances: ${balances.length ? balances.join(", ") : "(none)"}`);
 
+  const openGroceries = s.groceryList.filter((g) => !g.fulfilled);
   lines.push(
     `Grocery list: ${
-      s.groceryList.length
-        ? s.groceryList.map((g) => `${g.item} (${g.requestedBy})`).join(", ")
+      openGroceries.length
+        ? openGroceries.map((g) => `${g.item} (${g.requestedBy})`).join(", ")
         : "(empty)"
     }`
   );

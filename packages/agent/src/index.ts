@@ -7,6 +7,13 @@ import { serializeState, state } from "./state.js";
 import { log } from "./log.js";
 import { checkNags } from "./nag.js";
 import { parseExpense, applyExpense, buildExpenseAck } from "./ledger.js";
+import {
+  parseGroceryIntent,
+  applyGroceryIntent,
+  matchCompileCommand,
+  formatGroceryList,
+  doGroceryRun,
+} from "./grocery.js";
 
 const PORT = Number(process.env.AGENT_PORT) || 3000;
 const BRIDGE_PORT = Number(process.env.BRIDGE_PORT) || 3001;
@@ -49,6 +56,15 @@ app.post("/chat", async (req, res) => {
   log("chat.inbound", { sender, chatId, text });
 
   try {
+    // Phase 5: compile/run commands are deterministic — skip the model entirely
+    const compile = matchCompileCommand(text);
+    if (compile) {
+      const reply = compile === "run" ? doGroceryRun() : formatGroceryList();
+      log("chat.outbound", { sender, type: "grocery", command: compile, reply });
+      res.json({ reply });
+      return;
+    }
+
     const classification = await classifyMessage(sender, text);
 
     // Confidently irrelevant → stay quiet; bridge sends nothing for null reply
@@ -69,6 +85,18 @@ app.post("/chat", async (req, res) => {
         return;
       }
       // Didn't resolve to a concrete expense (e.g. "who owes what?") — fall through to main model
+    }
+
+    // Phase 5: grocery list updates
+    if (classification.type === "grocery") {
+      const intent = await parseGroceryIntent(text, sender);
+      if (intent) {
+        const reply = applyGroceryIntent(intent);
+        log("chat.outbound", { sender, type: "grocery", action: intent.action, reply });
+        res.json({ reply });
+        return;
+      }
+      // Couldn't extract a concrete intent — fall through to main model
     }
 
     const reply = await generateText({

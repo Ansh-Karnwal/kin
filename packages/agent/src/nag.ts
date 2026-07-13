@@ -54,15 +54,16 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
     }
   }
 
-  // Rule 3: Grocery staleness — 3+ items and last run 4+ days ago (or never)
-  if (s.groceryList.length >= 3) {
+  // Rule 3: Grocery staleness — 3+ open items and last run 4+ days ago (or never)
+  const openGroceries = s.groceryList.filter((g) => !g.fulfilled);
+  if (openGroceries.length >= 3) {
     const daysSinceRun = s.lastGroceryRun
       ? Math.floor((now.getTime() - Date.parse(s.lastGroceryRun)) / 86_400_000)
       : Infinity;
     if (daysSinceRun >= 4) {
       nags.push({
         target: "group",
-        message: `grocery list is getting long (${s.groceryList.length} items), want me to compile it?`,
+        message: `grocery list is getting long (${openGroceries.length} items), want me to compile it?`,
         priority: "low",
       });
     }
