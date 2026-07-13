@@ -13,6 +13,8 @@ export interface LedgerEntry {
   description: string;
   split: string[];
   timestamp: string;
+  /** Stored receipt image URL (InsForge storage), when logged from a photo. */
+  receiptUrl?: string;
 }
 
 export interface Chore {

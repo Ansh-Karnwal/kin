@@ -6,6 +6,7 @@
 
 import { nebius, MODELS } from "./llm.js";
 import { log } from "./log.js";
+import { uploadReceiptImage } from "./db.js";
 
 export interface ReceiptLineItem {
   name: string;
@@ -17,6 +18,8 @@ export interface ParsedReceipt {
   total: number;
   date?: string;
   lineItems: ReceiptLineItem[];
+  /** Stored image URL when InsForge storage is configured; absent otherwise. */
+  imageUrl?: string;
 }
 
 function stripCodeFences(raw: string): string {
@@ -69,7 +72,12 @@ export async function parseReceipt(imageBase64: string): Promise<ParsedReceipt |
     parsed.merchant = parsed.merchant || "unknown merchant";
     parsed.lineItems = Array.isArray(parsed.lineItems) ? parsed.lineItems : [];
 
-    log("vision.receipt_parsed", { merchant: parsed.merchant, total: parsed.total });
+    // Persist the receipt image to InsForge storage (no-op when unconfigured) so
+    // the ledger entry can link back to proof of purchase.
+    const imageUrl = await uploadReceiptImage(imageBase64);
+    if (imageUrl) parsed.imageUrl = imageUrl;
+
+    log("vision.receipt_parsed", { merchant: parsed.merchant, total: parsed.total, stored: !!imageUrl });
     return parsed;
   } catch (err) {
     log("vision.receipt_failed", { error: String(err) });

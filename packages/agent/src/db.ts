@@ -12,19 +12,48 @@ import type {
   UtilityBill,
 } from "./state.js";
 import { money } from "./state.js";
+import { log } from "./log.js";
 
+// ── Backend selection ───────────────────────────────────────────────────────
+//
+// Precedence: InsForge → Butterbase → in-memory. Whichever is configured first
+// wins. All three speak the same PostgREST filter grammar (eq./gte./lte./order/
+// limit), so only BASE + the auth token differ between the two REST backends —
+// every domain function below is backend-agnostic.
+
+// InsForge — agent-native backend (Postgres + storage). Its database REST API is
+// PostgREST-compatible; DB records live under the records path, storage under the
+// buckets path. If your InsForge deployment mounts these elsewhere, adjust the
+// two path constants here (and the mirror in scripts/provision.ts).
+export const INSFORGE_URL = (process.env.INSFORGE_URL ?? "").replace(/\/+$/, "");
+export const INSFORGE_API_KEY = process.env.INSFORGE_API_KEY ?? "";
+export const INSFORGE_BUCKET = process.env.INSFORGE_STORAGE_BUCKET || "receipts";
+export const INSFORGE_DB_PATH = "/api/database/records";
+export const INSFORGE_STORAGE_PATH = "/api/storage/buckets";
+export const USE_INSFORGE = !!INSFORGE_URL && !!INSFORGE_API_KEY;
+
+// Butterbase — the original REST backend.
 const APP_ID = process.env.BUTTERBASE_APP_ID ?? "";
 const API_KEY = process.env.BUTTERBASE_API_KEY ?? "";
-const BASE = `https://api.butterbase.ai/v1/${APP_ID}`;
 
-// When Butterbase isn't configured (no creds), the whole state layer runs in an
+// When neither remote backend is configured, the whole state layer runs in an
 // in-memory store so the app works fully offline — critical for demos. State
-// resets on restart; the bridge re-seeds members on boot. Set both
-// BUTTERBASE_APP_ID and BUTTERBASE_API_KEY to use the real backend.
-const USE_MEMORY = !APP_ID || !API_KEY;
-if (USE_MEMORY) {
+// resets on restart; the bridge re-seeds members on boot.
+const USE_MEMORY = !USE_INSFORGE && (!APP_ID || !API_KEY);
+
+// Resolved REST endpoint + bearer token for the active remote backend.
+const BASE = USE_INSFORGE
+  ? `${INSFORGE_URL}${INSFORGE_DB_PATH}`
+  : `https://api.butterbase.ai/v1/${APP_ID}`;
+const TOKEN = USE_INSFORGE ? INSFORGE_API_KEY : API_KEY;
+
+if (USE_INSFORGE) {
   console.warn(
-    `[${new Date().toISOString()}] [db.memory_mode] Butterbase not configured — using in-memory state (resets on restart)`
+    `[${new Date().toISOString()}] [db.insforge_mode] using InsForge backend at ${INSFORGE_URL}`
+  );
+} else if (USE_MEMORY) {
+  console.warn(
+    `[${new Date().toISOString()}] [db.memory_mode] no backend configured — using in-memory state (resets on restart)`
   );
 }
 
@@ -82,11 +111,11 @@ function memPatch<T>(table: string, id: string, body: unknown): T | null {
 // ── Low-level HTTP helpers ─────────────────────────────────────────────────────
 
 function hdrs() {
-  return { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` };
+  return { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` };
 }
 
 function authHdr() {
-  return { Authorization: `Bearer ${API_KEY}` };
+  return { Authorization: `Bearer ${TOKEN}` };
 }
 
 async function get<T>(table: string, qs?: Record<string, string>): Promise<T[]> {
@@ -156,6 +185,61 @@ async function upsert<T>(table: string, id: string, body: unknown): Promise<T> {
   if (r.ok) return r.json() as Promise<T>;
   if (r.status === 404) return post<T>(table, body);
   throw new Error(`UPSERT ${table}/${id} ${r.status}: ${await r.text()}`);
+}
+
+// ── Storage (InsForge object storage) ──────────────────────────────────────────
+
+/** Decode a data: URL or bare base64 string into raw bytes + mime type. */
+function decodeBase64Image(imageBase64: string): { bytes: Buffer; mime: string } {
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(imageBase64);
+  if (m) return { bytes: Buffer.from(m[2], "base64"), mime: m[1] };
+  return { bytes: Buffer.from(imageBase64, "base64"), mime: "image/jpeg" };
+}
+
+/**
+ * Upload a receipt image to the InsForge storage bucket and return a URL that
+ * can be persisted alongside the ledger entry. Only active when InsForge is
+ * configured; returns null otherwise or on any failure (storage must never break
+ * the receipt-parsing path). The demo runs fine without it.
+ */
+export async function uploadReceiptImage(
+  imageBase64: string,
+  filename?: string
+): Promise<string | null> {
+  if (!USE_INSFORGE) return null;
+  try {
+    const { bytes, mime } = decodeBase64Image(imageBase64);
+    const ext = mime.split("/")[1]?.replace("jpeg", "jpg") ?? "jpg";
+    const name = filename ?? `receipt-${crypto.randomUUID()}.${ext}`;
+    const url = `${INSFORGE_URL}${INSFORGE_STORAGE_PATH}/${encodeURIComponent(INSFORGE_BUCKET)}/objects`;
+
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(bytes)], { type: mime }), name);
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: authHdr(), // multipart boundary set automatically by fetch
+      body: form,
+    });
+    if (!r.ok) throw new Error(`upload ${r.status}: ${await r.text()}`);
+
+    // Prefer an explicit URL from the response; fall back to the canonical
+    // object path (works for public buckets).
+    const data = (await r.json().catch(() => ({}))) as {
+      url?: string; publicUrl?: string; public_url?: string; key?: string; name?: string;
+    };
+    const resolved =
+      data.url ??
+      data.publicUrl ??
+      data.public_url ??
+      `${url}/${encodeURIComponent(data.key ?? data.name ?? name)}`;
+
+    log("storage.receipt_uploaded", { name, url: resolved });
+    return resolved;
+  } catch (err) {
+    log("storage.receipt_upload_failed", { error: String(err) });
+    return null;
+  }
 }
 
 // ── Members + balances ─────────────────────────────────────────────────────────
@@ -282,14 +366,22 @@ export async function deleteAllFulfilledGrocery(): Promise<void> {
 
 function toLedgerEntry(r: {
   id: string; payer: string; amount: number; description: string; split: string[]; timestamp: string;
+  receipt_url?: string | null;
 }): LedgerEntry {
-  return { payer: r.payer, amount: r.amount, description: r.description, split: r.split, timestamp: r.timestamp };
+  return {
+    payer: r.payer,
+    amount: r.amount,
+    description: r.description,
+    split: r.split,
+    timestamp: r.timestamp,
+    receiptUrl: r.receipt_url ?? undefined,
+  };
 }
 
 export async function getLedgerEntries(limit?: number): Promise<LedgerEntry[]> {
   const qs: Record<string, string> = { order: "timestamp.asc" };
   if (limit) qs.limit = String(limit);
-  const rows = await get<{ id: string; payer: string; amount: number; description: string; split: string[]; timestamp: string }>(
+  const rows = await get<{ id: string; payer: string; amount: number; description: string; split: string[]; timestamp: string; receipt_url?: string | null }>(
     "ledger_entries",
     qs
   );
@@ -304,6 +396,7 @@ export async function addLedgerEntry(id: string, entry: LedgerEntry): Promise<vo
     description: entry.description,
     split: JSON.stringify(entry.split),
     timestamp: entry.timestamp,
+    receipt_url: entry.receiptUrl ?? null,
   });
 }
 

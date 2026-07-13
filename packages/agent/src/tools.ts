@@ -24,6 +24,7 @@ import { requestPayment } from "./payments.js";
 import { parseReceipt } from "./vision.js";
 import { callVendor } from "./vendor.js";
 import { webSearch } from "./search.js";
+import { getPrices } from "./nimble.js";
 import { addScheduledNag } from "./scheduled.js";
 import { log } from "./log.js";
 
@@ -396,6 +397,25 @@ const functionDeclarations: FunctionDeclaration[] = [
     },
   },
 
+  // Live price comparison (Nimble)
+  {
+    name: "compare_prices",
+    description:
+      "Get live per-store prices for a grocery/household product, cheapest first. Use when someone asks 'cheapest X near us', 'where's X cheapest', or 'how much is X'. Returns a store→price table.",
+    parameters: {
+      type: "object",
+      properties: {
+        product: { type: "string", description: "the product to price, e.g. 'oat milk'" },
+        stores: {
+          type: "array",
+          items: { type: "string" },
+          description: "optional list of stores to limit to; omit to compare across all",
+        },
+      },
+      required: ["product"],
+    },
+  },
+
   // Scheduled nudge
   {
     name: "set_nag",
@@ -708,11 +728,13 @@ export function createDispatch(ctx: ToolContext) {
           description: `${receipt.merchant} receipt`,
           splitType,
           beneficiaries,
+          receiptUrl: receipt.imageUrl,
         });
         return {
           ack: `read it — ${receipt.merchant.toLowerCase()} ${money(receipt.total)}, logged and split ${splitType === "even" ? "even" : "by item"}`,
           merchant: receipt.merchant,
           total: receipt.total,
+          receiptUrl: receipt.imageUrl,
         };
       }
 
@@ -734,6 +756,22 @@ export function createDispatch(ctx: ToolContext) {
         if (!query) return { error: "search for what?" };
         const result = await webSearch(query);
         return { text: result.text, sources: result.sources };
+      }
+
+      case "compare_prices": {
+        const product = String(args.product ?? "").trim();
+        if (!product) return { error: "price what?" };
+        const stores = Array.isArray(args.stores) ? (args.stores as string[]).map(String) : undefined;
+        const quotes = await getPrices(product, stores);
+        if (quotes.length === 0) return { error: `couldn't find prices for ${product}` };
+        const cheapest = quotes[0];
+        const table = quotes.map((q) => `${q.store}: ${money(q.price)}`).join("\n");
+        return {
+          product,
+          cheapest: { store: cheapest.store, price: cheapest.price },
+          quotes,
+          ack: `cheapest ${product} is ${money(cheapest.price)} at ${cheapest.store.toLowerCase()} 🛒\n${table}`,
+        };
       }
 
       case "set_nag": {

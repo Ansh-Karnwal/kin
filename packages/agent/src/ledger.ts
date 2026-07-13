@@ -10,6 +10,8 @@ export interface Expense {
   description: string;
   splitType: "even" | "item-attributed";
   beneficiaries: string[];
+  /** Stored receipt image URL, when this expense came from a receipt photo. */
+  receiptUrl?: string;
 }
 
 function isExpense(value: unknown): value is Expense {
@@ -80,6 +82,7 @@ export async function applyExpense(expense: Expense): Promise<void> {
     description: expense.description,
     split: beneficiaries,
     timestamp: new Date().toISOString(),
+    receiptUrl: expense.receiptUrl,
   });
 }
 

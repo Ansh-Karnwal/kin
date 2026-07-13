@@ -107,7 +107,7 @@ export async function callVendor(args: CallVendorArgs): Promise<CallVendorResult
 
   // No number? Look one up before dialing.
   if (!phone) {
-    const search = await webSearch(`phone number for ${args.purpose}`);
+    const search = await webSearch(`phone number for ${args.purpose}`, "deep");
     phone = extractPhone(search.text) ?? undefined;
     if (!phone) {
       return { ok: false, error: `couldn't find a number for "${args.purpose}" — got one i can dial?` };

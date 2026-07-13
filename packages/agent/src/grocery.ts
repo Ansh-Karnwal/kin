@@ -9,6 +9,8 @@ import {
   deleteAllFulfilledGrocery,
   setConfig,
 } from "./db.js";
+import { getPrices } from "./nimble.js";
+import { money } from "./state.js";
 import { log } from "./log.js";
 
 export type GroceryAction = "add" | "remove" | "fulfill" | "query";
@@ -151,13 +153,40 @@ export function matchCompileCommand(text: string): CompileCommand | null {
   return null;
 }
 
+/**
+ * Cheapest-store hints for the open list via Nimble. Best-effort — any failure
+ * just omits the hints so the grocery run never breaks on pricing.
+ */
+async function buildPriceHints(): Promise<string> {
+  try {
+    const items = await getGroceryItems(true);
+    if (items.length === 0) return "";
+    const lines = await Promise.all(
+      items.map(async (g) => {
+        const quotes = await getPrices(g.item);
+        if (quotes.length === 0) return null;
+        const best = quotes[0];
+        return `— ${g.item.toLowerCase()}: ${money(best.price)} at ${best.store.toLowerCase()}`;
+      })
+    );
+    const hits = lines.filter((l): l is string => !!l);
+    if (hits.length === 0) return "";
+    log("grocery.price_hints", { items: hits.length });
+    return `\n\ncheapest right now 💸\n${hits.join("\n")}`;
+  } catch (err) {
+    log("grocery.price_hints_failed", { error: String(err) });
+    return "";
+  }
+}
+
 /** Marks the run as done: stamps lastGroceryRun and removes fulfilled items. */
 export async function doGroceryRun(now: Date = new Date()): Promise<string> {
   const reply = await formatGroceryList();
+  const hints = await buildPriceHints();
   await Promise.all([
     setConfig("last_grocery_run", now.toISOString()),
     deleteAllFulfilledGrocery(),
   ]);
   log("grocery.run", {});
-  return reply;
+  return reply + hints;
 }
