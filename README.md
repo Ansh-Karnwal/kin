@@ -1,73 +1,136 @@
-# 🔥 Hearth
+# Hearth
 
-**A household agent that lives in your group chat — and actually *does* the chores, not just tracks them.**
+**A household operations agent that lives inside your group chat.**
 
-Hearth sits in a roommate group chat (Telegram), understands what's being said, and acts on it: splits expenses, orders the groceries, pays the bills, calls the landlord, reads receipts from photos, and nags the people who owe money — so no human has to be the one who asks.
+Hearth sits in a roommate or household group chat, understands what people are coordinating, and helps turn those messages into action: splitting expenses, managing groceries, tracking bills, calling vendors, reading receipts, and following up on unpaid balances.
+
+Instead of asking one person to remember everything, Hearth becomes the shared household coordinator.
 
 ---
 
-## The idea
+## Overview
 
-Most "household apps" are passive ledgers: you open an app, type what you spent, and it does math. Hearth is the opposite. It's **agent-native** — it lives where coordination already happens (the group chat) and turns intent into action.
+Most household apps are passive trackers. Someone still has to open an app, enter an expense, update a grocery list, or remind a roommate to pay them back.
 
-> *"sink's leaking and rent's due friday"*
->
-> → Hearth calls the landlord (pre-briefed with your unit number from its memory), books a repair window, drops it on the calendar, **and** fires off rent-split payment requests. Multiple real-world actions from one message, no app opened.
+Hearth works differently. It lives where household coordination already happens: the group chat.
 
-The moat is the **household graph**: every message enriches a memory of facts (`wifi_account → jake`, `maya_allergy → peanuts`, `lease_end → august 2026`). That context is what makes Hearth sound like a competent housemate instead of a chatbot.
+For example:
+
+> “sink’s leaking and rent’s due friday”
+
+Hearth can use the household context it already knows — unit number, landlord, roommates, balances, and recurring bills — to log the maintenance issue, prepare or place a landlord call, schedule a repair window, and start the rent split.
+
+The core idea is a persistent **household context graph**. Over time, Hearth builds memory around facts like:
+
+* `wifi_account → jake`
+* `maya_allergy → peanuts`
+* `lease_end → august 2026`
+* `landlord → dave`
+* `rent_due → friday`
+
+That shared context lets Hearth behave less like a chatbot and more like a reliable housemate who understands how the household works.
 
 ---
 
 ## How it works
 
-Hearth is a **hand-rolled tool-calling loop**, not a pipeline. Each message is handed to a model with a toolbox; the model decides which tools to call, chains them across steps, and only then replies.
+Hearth is built around a hand-rolled tool-calling loop.
 
-```
-Telegram group ──► Bridge ──► Agent (tool loop) ──► Tools ──► Bridge ──► Telegram group
+Each incoming message is passed to a model with access to household state and a set of tools. The model decides whether the message is relevant, which tools to call, whether to chain multiple actions together, and how to respond back in the group chat.
+
+```text
+Telegram group ──► Bridge ──► Agent/tool loop ──► Tools ──► Bridge ──► Telegram group
                                    │
-                                   ├─ classifier (is this relevant?)
-                                   ├─ orchestrator (which tools? chain them)
+                                   ├─ relevance classifier
+                                   ├─ tool orchestrator
                                    └─ household state injected every turn
 ```
 
-- **Inference** runs on **[Nebius AI Studio](https://studio.nebius.com)** (OpenAI-compatible): a Qwen3-235B orchestrator for tool-calling, a small Qwen3-30B classifier/extractor, and Qwen2.5-VL for reading receipt photos.
-- **State** is durable in **[Butterbase](https://butterbase.ai)** (members, balances, grocery list, facts, calendar, jobs). If Butterbase isn't configured, Hearth automatically falls back to an **in-memory store** so it runs fully offline.
-- **Browser actions** (grocery ordering, bill portals) drive a cloud browser via **[Browserbase](https://browserbase.com) + Stagehand**.
-- **Phone calls** go through **[Vapi](https://vapi.ai)**.
-- **Web search** uses **[Perplexity](https://perplexity.ai)** Sonar when available.
+### Core components
 
-### What Hearth can do
+* **Telegram bridge**
+  Connects the household group chat to the agent.
 
-| Tier 1 — household logic | Tier 2 — real-world actions |
-|---|---|
-| `log_expense` / `get_balances` — split costs, track who owes who | `pay_bill` — fill a biller portal, stop for a "yes" before paying |
-| `manage grocery list` (add/remove/compile) | `request_payment` — Venmo charge deeplinks for one-tap settle-up |
-| `remember_fact` / `recall_fact` — the household graph | `order_household_supplies` — build a cart, screenshot, approve, checkout |
-| `add_house_event` / calendar conflicts | `call_vendor` — call landlord/plumber/ISP/restaurant (pre-briefed) |
-| `log_maintenance_issue` / draft landlord message | `parse_receipt` — read a receipt photo → ledger |
-| `suggest_reorder` / move-in/out workflows | `web_search` — grounded vendor/price/bill lookups |
-| `set_nag` — schedule a future nudge | proactive nags (rent due, stale debt, long grocery list) |
+* **Agent runtime**
+  Runs the tool-calling loop, injects household state, and coordinates actions.
 
-> 🔒 **Safety:** Hearth never spends money silently. Orders and bill payments always stop at a screenshot + an explicit in-chat "yes" before anything moves.
+* **State layer**
+  Stores members, balances, grocery lists, facts, calendar events, jobs, and maintenance history.
+
+* **Action tools**
+  Handle expenses, groceries, bill payment flows, receipt parsing, vendor calls, web lookups, and scheduled reminders.
 
 ---
 
-## Project layout
+## Capabilities
 
-```
+### Household coordination
+
+| Capability           | Description                                                  |
+| -------------------- | ------------------------------------------------------------ |
+| Expense tracking     | Log shared expenses, split costs, and show balances          |
+| Grocery management   | Add, remove, compile, and prepare grocery runs               |
+| Household memory     | Remember and recall facts about the household                |
+| Calendar events      | Add house events and check conflicts                         |
+| Maintenance tracking | Log issues and draft landlord/vendor messages                |
+| Reorder suggestions  | Suggest recurring household supplies                         |
+| Nags and reminders   | Schedule future nudges for bills, chores, or unpaid balances |
+
+### Real-world actions
+
+| Capability        | Description                                                          |
+| ----------------- | -------------------------------------------------------------------- |
+| Bill payment flow | Navigate biller portals and stop for approval before payment         |
+| Payment requests  | Generate Venmo-style payment request links                           |
+| Grocery ordering  | Build carts, show screenshots, and wait for approval before checkout |
+| Vendor calls      | Call landlords, plumbers, ISPs, restaurants, or other vendors        |
+| Receipt parsing   | Read receipt photos and convert them into ledger entries             |
+| Web search        | Look up vendors, prices, biller information, or household questions  |
+
+---
+
+## Safety model
+
+Hearth does not spend money without approval.
+
+For actions such as bill payments or grocery orders, Hearth stops before checkout, posts a screenshot or summary in the chat, and waits for an explicit confirmation before proceeding.
+
+Demo mode also simulates external actions safely, allowing the project to be shown end-to-end without placing real orders, making real payments, or calling live services.
+
+---
+
+## Tech stack
+
+* **Nebius AI Studio** — inference for orchestration, classification, extraction, and receipt vision
+* **Butterbase** — durable household state
+* **Browserbase + Stagehand** — browser automation for grocery ordering and bill portals
+* **Vapi** — phone calls to vendors and service providers
+* **Perplexity Sonar** — grounded web search
+* **Telegram Bot API** — group chat interface
+* **Slack bridge** — optional alternate frontend
+
+---
+
+## Project structure
+
+```text
 Hearth/
 ├── packages/
-│   ├── agent/          # the brain: tool loop, tools, state, nag engine
+│   ├── agent/
 │   │   └── src/
-│   │       ├── index.ts        # express server: /chat, /callback, nags
-│   │       ├── llm.ts          # Nebius client + tool-calling loop
-│   │       ├── tools.ts        # tool schemas + dispatch
-│   │       ├── db.ts           # Butterbase REST layer (+ in-memory fallback)
-│   │       ├── billpay.ts, payments.ts, vision.ts, vendor.ts, search.ts …
-│   │       └── prompts.ts      # persona + tone (banned words)
-│   ├── bridge/         # Telegram Bot API ↔ agent (long-polling, photos, keyboards)
-│   └── slack-bridge/   # optional Slack front-end
-└── .env                # secrets (gitignored)
+│   │       ├── index.ts        # Express server: /chat, /callback, nags
+│   │       ├── llm.ts          # Nebius client and tool-calling loop
+│   │       ├── tools.ts        # Tool schemas and dispatch
+│   │       ├── db.ts           # Butterbase REST layer with in-memory fallback
+│   │       ├── billpay.ts      # Bill payment flows
+│   │       ├── payments.ts     # Payment request logic
+│   │       ├── vision.ts       # Receipt parsing
+│   │       ├── vendor.ts       # Vendor call flows
+│   │       ├── search.ts       # Web search
+│   │       └── prompts.ts      # Hearth persona and tone rules
+│   ├── bridge/                 # Telegram Bot API bridge
+│   └── slack-bridge/           # Optional Slack frontend
+└── .env                        # Local secrets and configuration
 ```
 
 ---
@@ -75,102 +138,198 @@ Hearth/
 ## Setup
 
 ### Prerequisites
-- Node.js 20+ and npm
-- A **Telegram bot** (free) and a group chat to add it to
-- A **Nebius AI Studio** API key (required — all inference)
-- *Optional:* Butterbase, Browserbase, Vapi, Perplexity keys (Hearth degrades gracefully without them)
 
-### 1. Install
+* Node.js 20+
+* npm
+* A Telegram bot
+* A Telegram group chat
+* A Nebius AI Studio API key
+
+Optional integrations:
+
+* Butterbase
+* Browserbase
+* Vapi
+* Perplexity
+
+Hearth can run without the optional integrations. When those services are not configured, it falls back to in-memory state or simulated actions where appropriate.
+
+---
+
+## Installation
+
 ```bash
 git clone https://github.com/Ansh-Karnwal/Hearth.git
 cd Hearth
 npm install
 ```
 
-### 2. Configure `.env`
-Copy the template and fill it in:
+---
+
+## Environment variables
+
+Copy the example environment file:
+
 ```bash
 cp .env.example .env
 ```
 
-**Minimum to run a demo** (everything else falls back or simulates):
+### Minimum required configuration
 
-| Key | What it's for |
-|---|---|
-| `NEBIUS_API_KEY` | All inference. Get it from the Nebius dashboard. |
-| `NEBIUS_ORCHESTRATOR_MODEL` | e.g. `Qwen/Qwen3-235B-A22B-Instruct-2507` |
-| `NEBIUS_FAST_MODEL` | e.g. `Qwen/Qwen3-30B-A3B-Instruct-2507` |
-| `NEBIUS_VISION_MODEL` | e.g. `Qwen/Qwen2.5-VL-72B-Instruct` |
-| `TELEGRAM_BOT_TOKEN` | From [@BotFather](https://t.me/botfather) → `/newbot` |
-| `DEMO_MODE` | `true` (default) = fully simulate unconnected integrations |
+| Key                         | Description                                                                |
+| --------------------------- | -------------------------------------------------------------------------- |
+| `NEBIUS_API_KEY`            | Required for all inference                                                 |
+| `NEBIUS_ORCHESTRATOR_MODEL` | Orchestrator model, for example `Qwen/Qwen3-235B-A22B-Instruct-2507`       |
+| `NEBIUS_FAST_MODEL`         | Classifier/extractor model, for example `Qwen/Qwen3-30B-A3B-Instruct-2507` |
+| `NEBIUS_VISION_MODEL`       | Vision model, for example `Qwen/Qwen2.5-VL-72B-Instruct`                   |
+| `TELEGRAM_BOT_TOKEN`        | Telegram bot token from BotFather                                          |
+| `DEMO_MODE`                 | `true` by default; simulates external actions safely                       |
 
-**Optional integrations** (unlock real actions):
+### Optional integrations
 
-| Key | Unlocks |
-|---|---|
-| `BUTTERBASE_APP_ID` + `BUTTERBASE_API_KEY` | Durable state (else in-memory) |
-| `BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID` + `GEMINI_API_KEY` | Real grocery ordering / bill portals (Stagehand) |
-| `VAPI_API_KEY` + `VAPI_PHONE_NUMBER_ID` | Real phone calls |
-| `PERPLEXITY_API_KEY` | Grounded web search (else ungrounded Nebius) |
+| Key                                                                 | Enables                                       |
+| ------------------------------------------------------------------- | --------------------------------------------- |
+| `BUTTERBASE_APP_ID` + `BUTTERBASE_API_KEY`                          | Durable household state                       |
+| `BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID` + `GEMINI_API_KEY` | Browser automation for carts and bill portals |
+| `VAPI_API_KEY` + `VAPI_PHONE_NUMBER_ID`                             | Live vendor calls                             |
+| `PERPLEXITY_API_KEY`                                                | Grounded web search                           |
 
-> **Demo vs. live:** `DEMO_MODE=true` makes bill pay, phone calls, grocery ordering, and utility checks fully *act out* the action with convincing confirmations and real ledger updates — no external service called, no "dry run" tells. Set `DEMO_MODE=false` only once Browserbase/Vapi are wired up.
+---
 
-### 3. Connect the Telegram group
-Add your bot to a group, send any message in it, then capture the chat id:
+## Connect Telegram
+
+Add your bot to a Telegram group, send a message in the group, then run:
+
 ```bash
-npm run setup -w packages/bridge   # saves TARGET_CHAT_GUID to .env
+npm run setup -w packages/bridge
 ```
 
-### 4. Run
-```bash
-npm run dev    # starts bridge + agent (+ slack-bridge) together
-```
-You should see `[agent.started]` and the bridge begin polling. Message your group — Hearth replies when something touches its domains, or whenever you `@hearth` it.
+This saves the target chat ID to your `.env` file.
+
+---
+
+## Run locally
 
 ```bash
-npm run build  # typecheck / compile all packages
+npm run dev
+```
+
+This starts the agent, Telegram bridge, and optional Slack bridge.
+
+You should see the agent start successfully and the bridge begin polling for messages.
+
+To build and typecheck:
+
+```bash
+npm run build
 ```
 
 ---
 
-## Try it (3-minute demo)
+## Demo script
 
-Seed the house once:
-```
+Seed the household once:
+
+```text
 hearth we're jake, maya, and sam
 our unit is 4B, landlord is dave
 ```
 
-**1. Grocery run — autonomous web action**
-```
+### 1. Grocery run
+
+```text
 we're out of oat milk, paper towels, and coffee
 do the grocery run
 ```
-→ builds the cart, posts it with **Place order / Cancel** buttons → tap to checkout → cost split automatically.
 
-**2. Call a vendor — voice**
-```
+Expected behavior:
+
+* Hearth compiles the grocery list
+* Builds a cart
+* Posts a summary or screenshot
+* Waits for approval
+* Splits the cost after checkout or simulated checkout
+
+### 2. Vendor call
+
+```text
 call a plumber about the leaking sink
 ```
-→ logs the issue, *"calling plumber now ☎️"*, then reports back a booked time and quote.
 
-**3. Receipt photo — multimodal perception**
-Send a photo of a receipt, caption `split this`
-→ *"read it — trader joe's $63.40, logged and split even, $21.13 each"*, then ask `who owes what`.
+Expected behavior:
+
+* Hearth logs the maintenance issue
+* Uses household context to brief the call
+* Starts or simulates the vendor call
+* Reports the result back to the group chat
+
+### 3. Receipt parsing
+
+Send a receipt photo with the caption:
+
+```text
+split this
+```
+
+Expected behavior:
+
+* Hearth reads the receipt
+* Extracts merchant and total
+* Logs the expense
+* Splits the cost across household members
+* Updates balances
+
+Then ask:
+
+```text
+who owes what
+```
+
+---
+
+## Demo mode vs. live mode
+
+`DEMO_MODE=true` is the safest way to run Hearth during demos.
+
+In demo mode:
+
+* External calls are simulated
+* Bill payments do not move money
+* Grocery orders are not actually placed
+* Vendor calls can be mocked
+* Ledger and household state still update normally
+
+Set `DEMO_MODE=false` only after the relevant live integrations are configured and tested.
 
 ---
 
 ## Tone
 
-Hearth texts like a chill roommate: lowercase, brief, occasionally dry. It will never say "Certainly!" or "I have successfully completed your request." Tone rules (including banned words) live in [`packages/agent/src/prompts.ts`](packages/agent/src/prompts.ts).
+Hearth responds like a helpful roommate: brief, casual, and direct.
+
+The tone rules live in:
+
+```text
+packages/agent/src/prompts.ts
+```
+
+The goal is to keep responses useful in a real group chat without sounding like a generic assistant.
 
 ---
 
-## Tech / sponsor mapping
+## Sponsor integration map
 
-- **Nebius AI Studio** — all inference (classifier, orchestrator, graph extraction, receipt vision)
-- **Browserbase + Stagehand** — grocery ordering, bill portals
-- **Vapi** — phone calls
-- **Butterbase** — durable household state
-- **Perplexity** — grounded web search
-- **Telegram Bot API** — the chat surface
+| Sponsor / platform      | How Hearth uses it                                                                           |
+| ----------------------- | -------------------------------------------------------------------------------------------- |
+| Nebius AI Studio        | Runs the classifier, orchestrator, graph extraction, and receipt vision models               |
+| Butterbase              | Stores durable household state, including balances, facts, grocery lists, and scheduled jobs |
+| Browserbase + Stagehand | Drives browser-based workflows such as grocery ordering and bill payment portals             |
+| Vapi                    | Places phone calls to landlords, plumbers, ISPs, and other household vendors                 |
+| Perplexity              | Provides grounded web search for vendor, pricing, and bill-related lookups                   |
+| Telegram Bot API        | Provides the primary group chat interface                                                    |
+
+---
+
+## License
+
+Add license information here.
