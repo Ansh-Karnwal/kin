@@ -3,10 +3,14 @@ import express from "express";
 import { classifyMessage } from "./classifier.js";
 import { generateText, MAIN_MODEL } from "./gemini.js";
 import { buildChatSystemPrompt, findBannedWord } from "./prompts.js";
-import { serializeState } from "./state.js";
+import { serializeState, state } from "./state.js";
 import { log } from "./log.js";
+import { checkNags } from "./nag.js";
+import { parseExpense, applyExpense, buildExpenseAck } from "./ledger.js";
 
 const PORT = Number(process.env.AGENT_PORT) || 3000;
+const BRIDGE_PORT = Number(process.env.BRIDGE_PORT) || 3001;
+const TARGET_CHAT = process.env.TARGET_CHAT_GUID ?? "";
 
 const FALLBACK_REPLY = "something went wrong on my end, try again?";
 
@@ -36,7 +40,9 @@ function isChatRequest(body: unknown): body is ChatRequest {
 
 app.post("/chat", async (req, res) => {
   if (!isChatRequest(req.body)) {
-    res.status(400).json({ error: "expected { sender: string, text: string, chatId: string }" });
+    res
+      .status(400)
+      .json({ error: "expected { sender: string, text: string, chatId: string }" });
     return;
   }
   const { sender, text, chatId } = req.body;
@@ -45,11 +51,24 @@ app.post("/chat", async (req, res) => {
   try {
     const classification = await classifyMessage(sender, text);
 
-    // Confidently irrelevant -> stay quiet; the bridge sends nothing for a null reply.
+    // Confidently irrelevant → stay quiet; bridge sends nothing for null reply
     if (!classification.relevant && classification.confidence === "high") {
       log("chat.skipped", { sender, type: classification.type });
       res.json({ reply: null });
       return;
+    }
+
+    // Phase 4: attempt expense parse before hitting the main model
+    if (classification.type === "expense") {
+      const expense = await parseExpense(text, sender);
+      if (expense) {
+        applyExpense(expense);
+        const ack = buildExpenseAck(expense);
+        log("chat.outbound", { sender, type: "expense", reply: ack });
+        res.json({ reply: ack });
+        return;
+      }
+      // Didn't resolve to a concrete expense (e.g. "who owes what?") — fall through to main model
     }
 
     const reply = await generateText({
@@ -68,6 +87,52 @@ app.post("/chat", async (req, res) => {
     res.json({ reply: FALLBACK_REPLY });
   }
 });
+
+app.get("/balances", (_req, res) => {
+  const result = Object.fromEntries(
+    state.members.map((m) => [m, state.balances[m] ?? 0])
+  );
+  res.json(result);
+});
+
+app.get("/nag-check", (_req, res) => {
+  const nags = checkNags(state);
+  log("nag.check", { count: nags.length });
+  res.json({ nags });
+});
+
+async function dispatchNags(): Promise<void> {
+  const nags = checkNags(state);
+  if (nags.length === 0) return;
+
+  log("nag.triggered", { count: nags.length });
+
+  const chatId = TARGET_CHAT;
+  if (!chatId) {
+    log("nag.skipped", { reason: "TARGET_CHAT_GUID not set" });
+    return;
+  }
+
+  for (const nag of nags) {
+    try {
+      await fetch(`http://localhost:${BRIDGE_PORT}/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chatId, message: nag.message }),
+      });
+      log("nag.sent", { target: nag.target, priority: nag.priority, message: nag.message });
+    } catch (err) {
+      log("nag.send_failed", { target: nag.target, error: String(err) });
+    }
+  }
+}
+
+// Run nag check every hour
+setInterval(() => {
+  dispatchNags().catch((err) =>
+    log("nag.scheduler_error", { error: String(err) })
+  );
+}, 60 * 60 * 1_000);
 
 app.listen(PORT, () => {
   log("agent.started", { port: PORT, model: MAIN_MODEL });
