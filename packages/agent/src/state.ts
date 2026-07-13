@@ -1,8 +1,10 @@
+// ── Existing household state ──────────────────────────────────────────────────
+
 export interface GroceryItem {
   item: string;
   requestedBy: string;
   addedAt: string;
-  fulfilled: boolean; // bought but not yet cleared by a grocery run
+  fulfilled: boolean;
 }
 
 export interface LedgerEntry {
@@ -25,7 +27,7 @@ export interface PendingItem {
   description: string;
   raisedBy: string;
   raisedAt: string;
-  deadline?: string; // ISO timestamp if a time was mentioned
+  deadline?: string;
   resolved: boolean;
   resolvedAt?: string;
   resolvedBy?: string;
@@ -38,8 +40,8 @@ export interface HouseholdState {
   ledger: LedgerEntry[];
   chores: Chore[];
   pendingItems: PendingItem[];
-  householdFacts: Record<string, string>; // e.g. "lease_end" -> "August 2025"
-  lastGroceryRun?: string; // ISO timestamp
+  householdFacts: Record<string, string>;
+  lastGroceryRun?: string;
 }
 
 export const state: HouseholdState = {
@@ -51,6 +53,177 @@ export const state: HouseholdState = {
   pendingItems: [],
   householdFacts: {},
 };
+
+// ── Maintenance issues (Feature 1) ────────────────────────────────────────────
+
+export type MaintenanceStatus = "open" | "landlord_notified" | "scheduled" | "resolved";
+export type MaintenancePriority = "low" | "medium" | "urgent";
+
+export interface MaintenanceIssue {
+  id: string;
+  description: string;
+  reportedBy: string;
+  status: MaintenanceStatus;
+  priority: MaintenancePriority;
+  firstSeenAt: string;
+  lastUpdatedAt: string;
+  resolutionNotes?: string;
+  landlordNotifiedAt?: string;
+  scheduledFor?: string;
+  vendor?: string;
+  photoUrls: string[];
+}
+
+/** In-memory store: issue id → issue */
+export const maintenanceIssues = new Map<string, MaintenanceIssue>();
+
+// ── House calendar (Feature 2) ────────────────────────────────────────────────
+
+export type HouseEventType =
+  | "repair"
+  | "guest"
+  | "travel"
+  | "bill"
+  | "social"
+  | "move"
+  | "package"
+  | "other";
+
+export interface HouseEvent {
+  id: string;
+  title: string;
+  eventDate: string; // YYYY-MM-DD
+  eventTime?: string; // HH:MM 24h
+  durationMinutes?: number;
+  allDay: boolean;
+  createdBy: string;
+  affectsMembers: string[]; // empty = whole house
+  eventType: HouseEventType;
+  notes?: string;
+  createdAt: string;
+}
+
+export const houseEvents = new Map<string, HouseEvent>();
+
+// ── Consumption patterns (Feature 3) ─────────────────────────────────────────
+
+export interface ConsumptionPattern {
+  id: string;
+  itemName: string;
+  /** Undefined until at least 2 orders — need two data points for an average. */
+  avgDaysBetweenOrders?: number;
+  lastOrderedAt: string;
+  timesOrdered: number;
+  typicalRequesters: string[];
+  updatedAt: string;
+}
+
+/** Keyed by lowercase item name for fast lookup. */
+export const consumptionPatterns = new Map<string, ConsumptionPattern>();
+
+// ── Order jobs (Phase 8 / grocery ordering) ───────────────────────────────────
+
+export type OrderStatus =
+  | "building"
+  | "awaiting_approval"
+  | "awaiting_otp"
+  | "placing"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+export interface OrderCartItem {
+  name: string;
+  quantity: number;
+  price: number;
+}
+
+export interface OrderJob {
+  id: string;
+  chatId: string;
+  status: OrderStatus;
+  items: Array<{ name: string; requestedBy: string }>;
+  sessionId?: string;
+  cart?: OrderCartItem[];
+  subtotal?: number;
+  note?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const orderJobs = new Map<string, OrderJob>();
+
+// ── Move events (Feature 5) ───────────────────────────────────────────────────
+
+export type MovePhase =
+  | "initiated"
+  | "deposit_assessment"
+  | "asset_split"
+  | "utility_transfers"
+  | "final_settlement"
+  | "key_handover"
+  | "completed";
+
+export interface DepositDeduction {
+  description: string;
+  amount: number;
+}
+
+export interface SharedAsset {
+  name: string;
+  value: number;
+  assignedTo?: string;
+  decision?: "take" | "sell" | "leave";
+}
+
+export interface MoveEvent {
+  id: string;
+  chatId: string;
+  type: "move_in" | "move_out";
+  member: string;
+  phase: MovePhase;
+  targetDate: string;
+  depositAmount?: number;
+  depositDeductions: DepositDeduction[];
+  sharedAssets: SharedAsset[];
+  utilityTransferStatus: Record<string, "pending" | "done" | "skipped">;
+  finalBalance?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const moveEvents = new Map<string, MoveEvent>();
+
+// ── Utility accounts / bills (Feature 4) ─────────────────────────────────────
+
+export interface UtilityAccount {
+  id: string;
+  name: string;
+  loginUrl: string;
+  contextId: string;
+  accountHolder: string;
+  autopayEnabled: boolean;
+  alertThresholdPct: number;
+  createdAt: string;
+}
+
+export type BillStatus = "fetched" | "alerted" | "paid" | "skipped";
+
+export interface UtilityBill {
+  id: string;
+  accountId: string;
+  amount: number;
+  dueDate?: string;
+  periodStart?: string;
+  periodEnd?: string;
+  status: BillStatus;
+  fetchedAt: string;
+}
+
+export const utilityAccounts = new Map<string, UtilityAccount>();
+export const utilityBills = new Map<string, UtilityBill>();
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 export function money(n: number): string {
   const fixed = Math.abs(n).toFixed(2);
@@ -67,7 +240,6 @@ function daysAgo(iso: string, now: Date): number {
   return Math.floor((now.getTime() - Date.parse(iso)) / 86_400_000);
 }
 
-/** Serialize the full household state for injection into every Gemini system prompt. */
 export function serializeState(s: HouseholdState = state, now: Date = new Date()): string {
   const lines: string[] = ["CURRENT HOUSEHOLD STATE:"];
 
@@ -120,6 +292,17 @@ export function serializeState(s: HouseholdState = state, now: Date = new Date()
           const dl = i.deadline ? `, due ${i.deadline.slice(11, 16)}` : "";
           return `"${i.description}" (${i.raisedBy}, ${age}h ago${dl})`;
         })
+        .join("; ")}`
+    );
+  }
+
+  const openMaintenance = [...maintenanceIssues.values()].filter(
+    (i) => i.status !== "resolved"
+  );
+  if (openMaintenance.length) {
+    lines.push(
+      `Open maintenance: ${openMaintenance
+        .map((i) => `${i.description} [${i.priority}] (${i.status})`)
         .join("; ")}`
     );
   }

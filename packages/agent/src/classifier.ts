@@ -3,7 +3,16 @@ import { JSON_ONLY, buildUtilitySystemPrompt } from "./prompts.js";
 import { serializeState } from "./state.js";
 import { log } from "./log.js";
 
-export type MessageType = "expense" | "grocery" | "chore" | "action_item" | "query" | "banter" | "other";
+export type MessageType =
+  | "expense"
+  | "grocery"
+  | "chore"
+  | "action_item"
+  | "query"
+  | "banter"
+  | "maintenance"
+  | "calendar"
+  | "other";
 
 export interface Classification {
   relevant: boolean;
@@ -11,10 +20,12 @@ export interface Classification {
   confidence: "high" | "low";
 }
 
-/** Fail-open default when the classifier errors or returns junk. */
 const FAIL_OPEN: Classification = { relevant: true, type: "other", confidence: "low" };
 
-const VALID_TYPES: readonly string[] = ["expense", "grocery", "chore", "action_item", "query", "banter", "other"];
+const VALID_TYPES: readonly string[] = [
+  "expense", "grocery", "chore", "action_item", "query",
+  "banter", "maintenance", "calendar", "other",
+];
 
 function isClassification(value: unknown): value is Classification {
   if (typeof value !== "object" || value === null) return false;
@@ -27,22 +38,27 @@ function isClassification(value: unknown): value is Classification {
   );
 }
 
-export async function classifyMessage(sender: string, text: string): Promise<Classification> {
-  const prompt = `Classify this roommate group-chat message for hearth (a household agent that tracks shared expenses, the grocery list, and chores).
+export async function classifyMessage(
+  sender: string,
+  text: string
+): Promise<Classification> {
+  const prompt = `Classify this roommate group-chat message for hearth (a household agent).
 
 Message from ${sender}: "${text}"
 
 ${JSON_ONLY}
-Schema: {"relevant": boolean, "type": "expense" | "grocery" | "chore" | "query" | "banter" | "other", "confidence": "high" | "low"}
+Schema: {"relevant": boolean, "type": "expense" | "grocery" | "chore" | "action_item" | "query" | "banter" | "maintenance" | "calendar" | "other", "confidence": "high" | "low"}
 
 Guidance:
-- "expense": someone paid for something shared, or money owed is being discussed ("venmo me", "i got the pizza, $42")
-- "grocery": adding/removing/asking about shopping list items ("we're out of oat milk", "got the paper towels")
-- "chore": assigning, completing, or discussing household tasks ("can someone take out the trash by friday")
-- "action_item": something that needs doing but isn't assigned yet ("we should make a reservation", "someone needs to get toilet paper", "we should call the landlord")
-- "query": a direct question for hearth about household state ("who owes what?", "what's on the list?")
+- "expense": someone paid for something shared, or money owed is discussed
+- "grocery": adding/removing/asking about shopping list items
+- "chore": assigning, completing, or discussing household tasks
+- "action_item": something that needs doing but isn't assigned yet
+- "query": a direct question for hearth about household state
+- "maintenance": something broken, leaking, not working, or needing repair ("broken", "leaking", "clog", "no hot water", "heat isn't", "AC is", "mold", "crack", "weird smell", "flickering")
+- "calendar": a date + event pair (repair windows, guests, travel, package arrivals, lease dates, parties)
 - "banter": social chatter not aimed at hearth
-- "relevant": false only when hearth clearly has nothing to do or say here (pure banter between humans)
+- "relevant": false only when hearth clearly has nothing to do or say (pure banter)
 - "confidence": "high" only when you're sure`;
 
   const result = await generateJson<Classification>({
@@ -51,7 +67,12 @@ Guidance:
     prompt,
   });
 
-  const classification = result !== null && isClassification(result) ? result : FAIL_OPEN;
-  log("classifier.result", { sender, ...classification, failedOpen: result === null || !isClassification(result) });
+  const classification =
+    result !== null && isClassification(result) ? result : FAIL_OPEN;
+  log("classifier.result", {
+    sender,
+    ...classification,
+    failedOpen: result === null || !isClassification(result),
+  });
   return classification;
 }

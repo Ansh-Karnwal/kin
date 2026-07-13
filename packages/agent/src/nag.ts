@@ -1,16 +1,21 @@
-import { HouseholdState, money } from "./state.js";
+import { HouseholdState, money, maintenanceIssues, houseEvents, moveEvents } from "./state.js";
+import { getStalOpenIssues } from "./maintenance.js";
+import { getEventsWithin } from "./calendar.js";
+import { shouldSuggestDailyReorder, suggestReorder, markSuggestedItems } from "./reorder.js";
 
 export interface NagMessage {
   target: string | "group";
   message: string;
   priority: "high" | "low";
+  /** Optional inline keyboard for this nag (keyboard-capable bridge endpoints). */
+  keyboard?: Array<Array<{ text: string; callback_data: string }>>;
 }
 
 export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage[] {
   const nags: NagMessage[] = [];
   const day = now.getDate();
 
-  // Rule 1: Rent due — within 3 days of the 1st (days 29–31 or 1–3)
+  // ── Rule 1: Rent due ───────────────────────────────────────────────────────
   const nearRent = day <= 3 || day >= 29;
   if (nearRent) {
     const debtors = s.members.filter((m) => (s.balances[m] ?? 0) < -0.005);
@@ -28,7 +33,7 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
     }
   }
 
-  // Rule 2: Stale debt — balance outstanding 5+ days, based on oldest ledger entry
+  // ── Rule 2: Stale debt ────────────────────────────────────────────────────
   for (const member of s.members) {
     const balance = s.balances[member] ?? 0;
     if (balance >= -0.005) continue;
@@ -54,7 +59,7 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
     }
   }
 
-  // Rule 3: Grocery staleness — 3+ open items and last run 4+ days ago (or never)
+  // ── Rule 3: Grocery staleness ─────────────────────────────────────────────
   const openGroceries = s.groceryList.filter((g) => !g.fulfilled);
   if (openGroceries.length >= 3) {
     const daysSinceRun = s.lastGroceryRun
@@ -69,7 +74,7 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
     }
   }
 
-  // Rule 4: Overdue chore — dueDate passed and not marked done
+  // ── Rule 4: Overdue chores ────────────────────────────────────────────────
   for (const chore of s.chores) {
     if (chore.done || !chore.dueDate) continue;
     const due = Date.parse(chore.dueDate);
@@ -82,7 +87,7 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
     }
   }
 
-  // Rule 5: Unresolved action items
+  // ── Rule 5: Unresolved action items ───────────────────────────────────────
   for (const item of s.pendingItems) {
     if (item.resolved) continue;
     const ageMs = now.getTime() - Date.parse(item.raisedAt);
@@ -91,7 +96,6 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
     if (item.deadline) {
       const msUntil = Date.parse(item.deadline) - now.getTime();
       if (msUntil <= 2 * 3_600_000) {
-        // Within 2 hours of deadline (or past it)
         const overdue = msUntil < 0;
         nags.push({
           target: "group",
@@ -102,10 +106,113 @@ export function checkNags(s: HouseholdState, now: Date = new Date()): NagMessage
         });
       }
     } else if (ageHours >= 6) {
-      // No deadline, stale for 6+ hours
       nags.push({
         target: "group",
         message: `reminder — "${item.description}" (raised by ${item.raisedBy.toLowerCase()}) — anyone picked this up?`,
+        priority: "low",
+      });
+    }
+  }
+
+  // ── Rule 6: Maintenance staleness (F1) ───────────────────────────────────
+  const nagDays = Number(s.householdFacts["maintenance_nag_days"] ?? 5);
+  const staleIssues = getStalOpenIssues(nagDays, now);
+  for (const issue of staleIssues) {
+    const daysOpen = Math.floor(
+      (now.getTime() - Date.parse(issue.firstSeenAt)) / 86_400_000
+    );
+    nags.push({
+      target: "group",
+      message: `the ${issue.description.toLowerCase()} has been open for ${daysOpen} days — still not sorted? want me to draft something for the landlord?`,
+      priority: issue.priority === "urgent" ? "high" : "low",
+      keyboard: [[
+        { text: "Draft message", callback_data: `maintenance:draft:${issue.id}` },
+        { text: "It's resolved", callback_data: `maintenance:resolve:${issue.id}` },
+      ]],
+    });
+  }
+
+  // ── Rule 7: Calendar reminders (F2) ──────────────────────────────────────
+  // 24h reminder for whole-house events
+  const in24h = getEventsWithin(24, now);
+  const in1h = getEventsWithin(1, now);
+
+  const alreadyIn1h = new Set(in1h.map((e) => e.id));
+
+  for (const event of in24h) {
+    if (alreadyIn1h.has(event.id)) continue; // 1h nag takes priority
+    if (event.affectsMembers.length > 0) continue; // only whole-house events for 24h nag
+    const timeHint = event.eventTime ? ` at ${event.eventTime}` : "";
+    nags.push({
+      target: "group",
+      message: `reminder: ${event.title.toLowerCase()}${timeHint} tomorrow`,
+      priority: "low",
+    });
+  }
+
+  for (const event of in1h) {
+    // 1h reminder for repair windows — ping whoever should be home
+    if (event.eventType === "repair") {
+      const who =
+        event.affectsMembers.length > 0
+          ? event.affectsMembers.map((m) => m.toLowerCase()).join(", ")
+          : "someone";
+      const timeHint = event.eventTime ? ` at ${event.eventTime}` : "";
+      nags.push({
+        target: event.affectsMembers[0] ?? "group",
+        message: `heads up — ${event.title.toLowerCase()}${timeHint} in about an hour. ${who}, you're listed as home for this 🔧`,
+        priority: "high",
+      });
+    } else if (event.eventType === "package") {
+      nags.push({
+        target: "group",
+        message: `package due today, someone should be around 👀`,
+        priority: "low",
+      });
+    }
+  }
+
+  // Lease end reminder
+  const leaseEnd = s.householdFacts["lease_end"];
+  if (leaseEnd) {
+    const daysUntil = Math.floor(
+      (Date.parse(leaseEnd) - now.getTime()) / 86_400_000
+    );
+    if (daysUntil === 7) {
+      nags.push({
+        target: "group",
+        message: `lease is up in a week — has anyone sorted renewal or move-out?`,
+        priority: "high",
+      });
+    }
+  }
+
+  // ── Rule 8: Daily reorder check at 9am (F3) ───────────────────────────────
+  if (now.getHours() === 9 && now.getMinutes() < 60) {
+    if (shouldSuggestDailyReorder()) {
+      const result = suggestReorder({ triggered_by: "scheduled" });
+      if (result.suggestions.length >= 2) {
+        markSuggestedItems(result.suggestions.map((s) => s.itemName));
+        nags.push({
+          target: "group",
+          message: result.message,
+          priority: "low",
+          keyboard: result.keyboard.length > 0 ? result.keyboard : undefined,
+        });
+      }
+    }
+  }
+
+  // ── Rule 9: Move event stall check (F5) ──────────────────────────────────
+  for (const move of moveEvents.values()) {
+    if (move.phase === "completed") continue;
+    const daysStalled = Math.floor(
+      (now.getTime() - Date.parse(move.updatedAt)) / 86_400_000
+    );
+    if (daysStalled >= 2) {
+      nags.push({
+        target: "group",
+        message: `move-${move.type === "move_out" ? "out" : "in"} for ${move.member.toLowerCase()} is still at "${move.phase.replace("_", " ")}" — any update?`,
         priority: "low",
       });
     }

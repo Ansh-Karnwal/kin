@@ -9,10 +9,12 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
+    "@browserbasehq/stagehand": "^3.5.0",
+    "@google/genai": "^2.8.0",
     "better-sqlite3": "^11.7.0",
     "dotenv": "^16.4.0",
-    "express": "^4.21.0"
+    "express": "^4.21.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
