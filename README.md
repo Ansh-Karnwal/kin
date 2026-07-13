@@ -1,5 +1,7 @@
 # Hearth
 
+*****A household operations agent that lives inside your group chat.***
+
 **A household operations agent that lives inside your group chat.**
 
 Hearth sits in a roommate or household group chat, understands what people are coordinating, and helps turn those messages into action: splitting expenses, managing groceries, tracking bills, calling vendors, reading receipts, and following up on unpaid balances.
