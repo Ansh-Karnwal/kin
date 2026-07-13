@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Kin — the household agent in your group chat</title>
+<meta name="description" content="Kin lives in your roommate group chat and runs the household: groceries, bills, splits, vendor calls. Text it on Telegram." />
+<style>
+  /* ── tokens ──────────────────────────────────────────────── */
+  :root {
+    --ink: #17140f;
+    --ink-raised: #211e17;
+    --ink-line: #35301f;
+    --text: #ede6da;
+    --text-dim: #a89e8c;
+    --ember: #ffb454;
+    --ember-deep: #e08a2e;
+    --tg: #2aabee;
+    --tg-deep: #229ed9;
+    --bubble-them: #262218;
+    --bubble-me: #2b4256;
+    --card-glow: rgba(255, 180, 84, 0.08);
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --ink: #f5f3ef;
+      --ink-raised: #ffffff;
+      --ink-line: #e2ddd2;
+      --text: #241f16;
+      --text-dim: #6f6858;
+      --ember: #a8641a;
+      --ember-deep: #8a5013;
+      --bubble-them: #eceae4;
+      --bubble-me: #d9ecf8;
+      --card-glow: rgba(168, 100, 26, 0.06);
+      color-scheme: light;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #17140f; --ink-raised: #211e17; --ink-line: #35301f;
+    --text: #ede6da; --text-dim: #a89e8c;
+    --ember: #ffb454; --ember-deep: #e08a2e;
+    --bubble-them: #262218; --bubble-me: #2b4256;
+    --card-glow: rgba(255, 180, 84, 0.08);
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --ink: #f5f3ef; --ink-raised: #ffffff; --ink-line: #e2ddd2;
+    --text: #241f16; --text-dim: #6f6858;
+    --ember: #a8641a; --ember-deep: #8a5013;
+    --bubble-them: #eceae4; --bubble-me: #d9ecf8;
+    --card-glow: rgba(168, 100, 26, 0.06);
+    color-scheme: light;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--ink);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .serif {
+    font-family: "Iowan Old Style", "Palatino Nova", Palatino, "Book Antiqua", Georgia, serif;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+  .mono {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  a { color: inherit; }
+  a:focus-visible, button:focus-visible {
+    outline: 2px solid var(--ember);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  /* ── nav ─────────────────────────────────────────────────── */
+  nav {
+    position: sticky; top: 0; z-index: 50;
+    background: color-mix(in srgb, var(--ink) 82%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--ink-line);
+  }
+  .nav-in {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 60px;
+  }
+  .brand { font-size: 22px; text-decoration: none; }
+  .brand em { font-style: normal; color: var(--ember); }
+  .nav-links { display: flex; gap: 28px; align-items: center; }
+  .nav-links a {
+    text-decoration: none; font-size: 14px; color: var(--text-dim);
+    transition: color 0.15s;
+  }
+  .nav-links a:hover { color: var(--text); }
+  .nav-cta {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--tg); color: #fff !important;
+    padding: 8px 16px; border-radius: 999px;
+    font-size: 14px !important; font-weight: 600; text-decoration: none;
+    transition: background 0.15s;
+  }
+  .nav-cta:hover { background: var(--tg-deep); }
+
+  /* ── hero ────────────────────────────────────────────────── */
+  header.hero {
+    position: relative;
+    padding: 88px 0 96px;
+    overflow: hidden;
+  }
+  header.hero::before {
+    content: "";
+    position: absolute; inset: -40% -20% auto;
+    height: 130%;
+    background: radial-gradient(ellipse 55% 45% at 72% 42%, var(--card-glow), transparent 70%);
+    pointer-events: none;
+  }
+  .hero-grid {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1.05fr 0.95fr;
+    gap: 56px;
+    align-items: center;
+  }
+  .eyebrow {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.18em;
+    color: var(--ember);
+  }
+  h1 {
+    font-size: clamp(42px, 5.4vw, 64px);
+    line-height: 1.06;
+    text-wrap: balance;
+    margin: 18px 0 22px;
+  }
+  .hero-sub {
+    color: var(--text-dim);
+    font-size: 19px;
+    max-width: 32em;
+    margin-bottom: 34px;
+  }
+  .hero-sub strong { color: var(--text); font-weight: 600; }
+  .cta-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .tg-btn {
+    display: inline-flex; align-items: center; gap: 12px;
+    background: linear-gradient(180deg, var(--tg), var(--tg-deep));
+    color: #fff; text-decoration: none;
+    font-size: 18px; font-weight: 650;
+    padding: 16px 28px; border-radius: 14px;
+    box-shadow: 0 8px 28px rgba(42, 171, 238, 0.32);
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .tg-btn:hover { transform: translateY(-2px); box-shadow: 0 12px 34px rgba(42, 171, 238, 0.42); }
+  .tg-btn svg { width: 24px; height: 24px; flex: none; }
+  .cta-hint { font-size: 13px; color: var(--text-dim); }
+  .cta-hint .mono { color: var(--ember); }
+
+  /* ── phone / chat replay ─────────────────────────────────── */
+  .phone {
+    position: relative;
+    background: var(--ink-raised);
+    border: 1px solid var(--ink-line);
+    border-radius: 26px;
+    padding: 18px 18px 22px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+    max-width: 420px;
+    justify-self: end;
+    width: 100%;
+  }
+  .phone-top {
+    display: flex; align-items: center; gap: 12px;
+    padding-bottom: 14px; margin-bottom: 14px;
+    border-bottom: 1px solid var(--ink-line);
+  }
+  .avatar {
+    width: 38px; height: 38px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--ember), var(--ember-deep));
+    display: grid; place-items: center;
+    color: #1a1206; font-weight: 700; font-size: 17px;
+  }
+  .phone-title { font-weight: 650; font-size: 15px; line-height: 1.25; }
+  .phone-title small { display: block; font-weight: 400; font-size: 12px; color: var(--text-dim); }
+  .chat { display: flex; flex-direction: column; gap: 10px; }
+  .msg {
+    max-width: 86%;
+    padding: 9px 14px;
+    border-radius: 16px;
+    font-size: 14.5px;
+    line-height: 1.45;
+    opacity: 0;
+    transform: translateY(8px);
+    animation: msg-in 0.45s ease forwards;
+  }
+  .msg.them { background: var(--bubble-them); border-bottom-left-radius: 5px; align-self: flex-start; }
+  .msg.me { background: var(--bubble-me); border-bottom-right-radius: 5px; align-self: flex-end; }
+  .msg .who { display: block; font-size: 11px; font-weight: 650; color: var(--ember); margin-bottom: 2px; }
+  .msg.card { max-width: 92%; border: 1px solid var(--ink-line); background: var(--ink); align-self: flex-start; border-radius: 14px; }
+  .card-total { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card-actions { display: flex; gap: 8px; margin-top: 9px; }
+  .card-actions span {
+    flex: 1; text-align: center; font-size: 12.5px; font-weight: 650;
+    padding: 6px 0; border-radius: 8px; border: 1px solid var(--ink-line);
+  }
+  .card-actions .ok { background: var(--tg); border-color: var(--tg); color: #fff; }
+  @keyframes msg-in { to { opacity: 1; transform: none; } }
+  .msg:nth-child(1) { animation-delay: 0.4s; }
+  .msg:nth-child(2) { animation-delay: 1.3s; }
+  .msg:nth-child(3) { animation-delay: 2.3s; }
+  .msg:nth-child(4) { animation-delay: 3.4s; }
+  .msg:nth-child(5) { animation-delay: 4.2s; }
+  @media (prefers-reduced-motion: reduce) {
+    .msg { animation: none; opacity: 1; transform: none; }
+    .tg-btn, .tg-btn:hover { transition: none; transform: none; }
+  }
+
+  /* ── shared section chrome ───────────────────────────────── */
+  section { padding: 84px 0; border-top: 1px solid var(--ink-line); }
+  .sec-head { max-width: 620px; margin-bottom: 44px; }
+  h2 { font-size: clamp(30px, 3.6vw, 42px); line-height: 1.12; text-wrap: balance; margin: 14px 0 14px; }
+  .sec-head p { color: var(--text-dim); }
+
+  /* ── capabilities ────────────────────────────────────────── */
+  .cap-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+  .cap {
+    background: var(--ink-raised);
+    border: 1px solid var(--ink-line);
+    border-radius: 16px;
+    padding: 22px 22px 20px;
+  }
+  .cap h3 { font-size: 16.5px; margin-bottom: 6px; }
+  .cap p { font-size: 14.5px; color: var(--text-dim); }
+  .cap .quote {
+    display: inline-block;
+    font-size: 12.5px;
+    color: var(--ember);
+    background: var(--card-glow);
+    border-radius: 6px;
+    padding: 2px 8px;
+    margin-bottom: 12px;
+  }
+
+  /* ── loops ───────────────────────────────────────────────── */
+  .loops-note {
+    display: inline-flex; align-items: baseline; gap: 8px;
+    font-size: 13px; color: var(--text-dim);
+    border: 1px dashed var(--ink-line);
+    border-radius: 999px;
+    padding: 6px 16px;
+    margin-bottom: 40px;
+  }
+  .loops-note b { color: var(--ember); font-weight: 650; }
+  .loop-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .loop {
+    background: var(--ink-raised);
+    border: 1px solid var(--ink-line);
+    border-radius: 18px;
+    padding: 26px 24px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .loop .tag {
+    align-self: flex-start;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.16em;
+    color: var(--ember);
+    border: 1px solid color-mix(in srgb, var(--ember) 40%, transparent);
+    border-radius: 999px;
+    padding: 4px 12px;
+  }
+  .loop h3 { font-size: 22px; }
+  .loop p { font-size: 15px; color: var(--text-dim); }
+  .loop p strong { color: var(--text); font-weight: 600; }
+  .flywheel {
+    margin-top: 16px;
+    background: linear-gradient(180deg, var(--card-glow), transparent);
+    border: 1px solid var(--ink-line);
+    border-radius: 18px;
+    padding: 30px 28px;
+  }
+  .flywheel .chain {
+    font-size: 14px;
+    color: var(--text-dim);
+    display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center;
+    margin-bottom: 14px;
+  }
+  .flywheel .chain b {
+    color: var(--text); font-weight: 600;
+    background: var(--ink-raised);
+    border: 1px solid var(--ink-line);
+    padding: 4px 12px; border-radius: 999px;
+    font-size: 13px;
+  }
+  .flywheel .chain .arr { color: var(--ember); }
+  .flywheel > p { font-size: 15.5px; max-width: 46em; }
+  .flywheel > p strong { color: var(--ember); font-weight: 650; }
+
+  /* ── sponsors ────────────────────────────────────────────── */
+  .sponsor-feature {
+    background: var(--ink-raised);
+    border: 1px solid color-mix(in srgb, var(--ember) 35%, var(--ink-line));
+    border-radius: 20px;
+    padding: 34px 32px;
+    margin-bottom: 14px;
+    background-image: radial-gradient(ellipse 60% 100% at 85% 0%, var(--card-glow), transparent 70%);
+  }
+  .sponsor-feature .badge {
+    display: inline-block;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.16em;
+    color: #1a1206;
+    background: linear-gradient(135deg, var(--ember), var(--ember-deep));
+    border-radius: 999px;
+    padding: 5px 14px;
+    font-weight: 700;
+    margin-bottom: 16px;
+  }
+  .sponsor-feature h3 { font-size: 28px; margin-bottom: 12px; }
+  .sponsor-feature > p { color: var(--text-dim); max-width: 52em; font-size: 16px; }
+  .sponsor-feature > p strong, .sponsor p strong { color: var(--text); font-weight: 600; }
+  .sponsor-points {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 12px; margin-top: 22px;
+    list-style: none;
+  }
+  .sponsor-points li {
+    background: var(--ink);
+    border: 1px solid var(--ink-line);
+    border-radius: 12px;
+    padding: 14px 16px;
+    font-size: 13.5px;
+    color: var(--text-dim);
+  }
+  .sponsor-points li b { display: block; color: var(--text); font-size: 14px; margin-bottom: 3px; font-weight: 650; }
+  .sponsor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .sponsor {
+    background: var(--ink-raised);
+    border: 1px solid var(--ink-line);
+    border-radius: 18px;
+    padding: 26px 24px;
+  }
+  .sponsor h3 { font-size: 20px; margin-bottom: 4px; }
+  .sponsor .role {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.14em;
+    color: var(--ember); margin-bottom: 12px;
+  }
+  .sponsor p { font-size: 14.5px; color: var(--text-dim); }
+
+  /* ── footer cta ──────────────────────────────────────────── */
+  .fin { text-align: center; padding: 100px 0 90px; }
+  .fin h2 { margin-bottom: 14px; }
+  .fin p { color: var(--text-dim); margin-bottom: 34px; }
+  footer {
+    border-top: 1px solid var(--ink-line);
+    padding: 26px 0;
+  }
+  .foot-in {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 13.5px; color: var(--text-dim); flex-wrap: wrap; gap: 12px;
+  }
+  .foot-in a { color: var(--text-dim); }
+  .foot-in a:hover { color: var(--text); }
+
+  /* ── scroll reveals & hover micro-interactions ──────────── */
+  .reveal {
+    opacity: 0;
+    transform: translateY(26px);
+    transition: opacity 0.65s ease, transform 0.65s cubic-bezier(0.22, 0.61, 0.36, 1);
+    transition-delay: var(--d, 0ms);
+  }
+  .reveal.in { opacity: 1; transform: none; }
+  .chain b.reveal, .chain .arr.reveal { transform: translateY(10px) scale(0.96); }
+  .chain b.reveal.in, .chain .arr.reveal.in { transform: none; }
+  .cap, .loop, .sponsor, .sponsor-feature, .sponsor-points li {
+    transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+  }
+  .cap:hover, .loop:hover, .sponsor:hover {
+    transform: translateY(-4px);
+    border-color: color-mix(in srgb, var(--ember) 45%, var(--ink-line));
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.22);
+  }
+  .sponsor-feature:hover {
+    border-color: color-mix(in srgb, var(--ember) 60%, var(--ink-line));
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .reveal { opacity: 1; transform: none; transition: none; }
+    .cap:hover, .loop:hover, .sponsor:hover { transform: none; transition: none; }
+  }
+
+  /* ── responsive ──────────────────────────────────────────── */
+  @media (max-width: 900px) {
+    .hero-grid { grid-template-columns: 1fr; gap: 44px; }
+    .phone { justify-self: start; }
+    .cap-grid, .loop-grid, .sponsor-points { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 620px) {
+    .cap-grid, .loop-grid, .sponsor-grid, .sponsor-points { grid-template-columns: 1fr; }
+    .nav-links a:not(.nav-cta) { display: none; }
+    section { padding: 64px 0; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap nav-in">
+    <a class="brand serif" href="#">kin<em>.</em></a>
+    <div class="nav-links">
+      <a href="#capabilities">capabilities</a>
+      <a href="#loops">the loops</a>
+      <a href="#sponsors">built on</a>
+      <a class="nav-cta" href="https://telegram.me/hearth1_bot" target="_blank" rel="noopener">
+        text kin
+      </a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow mono">household operations agent</span>
+      <h1 class="serif">your house, running itself in the group chat.</h1>
+      <p class="hero-sub">
+        Kin lives inside your roommate group chat. Say <strong>"buy me chicken and split it"</strong>
+        and it sweeps prices, builds the cart, waits for one tap of approval, and settles the
+        tab between everyone. Groceries, bills, vendor calls, receipts — no app to open, ever.
+      </p>
+      <div class="cta-row">
+        <a class="tg-btn" href="https://telegram.me/hearth1_bot" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+          text kin on telegram
+        </a>
+        <span class="cta-hint">opens <span class="mono">@hearth1_bot</span> — say hi, it texts back</span>
+      </div>
+    </div>
+
+    <div class="phone" aria-label="Example conversation with Kin in a Telegram group chat">
+      <div class="phone-top">
+        <div class="avatar serif">k</div>
+        <div class="phone-title">the house 🏡<small>ansh, adithya, kin</small></div>
+      </div>
+      <div class="chat">
+        <div class="msg me">buy me chicken and split it</div>
+        <div class="msg them"><span class="who">kin</span>chicken added. ordering now — i'll send the cart for approval in a sec.</div>
+        <div class="msg them card">
+          <span class="who">kin</span>
+          cart's ready 🧾 1 item · <span class="card-total">$3.99</span>
+          <div class="card-actions"><span class="ok">✓ approve</span><span>✕ cancel</span></div>
+        </div>
+        <div class="msg me">yes</div>
+        <div class="msg them"><span class="who">kin</span>done — $3.99 split evenly between ansh and adithya, $2.00 each. added to the tab.</div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="capabilities">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow mono">capabilities</span>
+      <h2 class="serif">less "who's dealing with this?", more "handled."</h2>
+      <p>Every household chore that used to need a designated adult, absorbed by one agent that already knows your house — the roommates, the balances, the landlord, the lease.</p>
+    </div>
+    <div class="cap-grid">
+      <div class="cap">
+        <span class="quote">"buy me chicken and split it"</span>
+        <h3>Grocery ordering</h3>
+        <p>Price-sweeps stores, builds the cart, posts it for one-tap approval, then splits the cost and updates everyone's tab.</p>
+      </div>
+      <div class="cap">
+        <span class="quote">"pay the electric bill"</span>
+        <h3>Bill pay</h3>
+        <p>Navigates the biller portal with browser automation and stops for an explicit "yes" in chat before any money moves.</p>
+      </div>
+      <div class="cap">
+        <span class="quote">📷 "split this"</span>
+        <h3>Receipt vision</h3>
+        <p>Drop a receipt photo in the chat. Kin reads it, logs the expense, splits it, and files the image away for the record.</p>
+      </div>
+      <div class="cap">
+        <span class="quote">"call the landlord, sink's leaking"</span>
+        <h3>Vendor calls</h3>
+        <p>Places real phone calls to landlords, plumbers, and ISPs — briefed with household context like your unit number.</p>
+      </div>
+      <div class="cap">
+        <span class="quote">"who owes what"</span>
+        <h3>Shared ledger</h3>
+        <p>Tracks every split and balance in a persistent ledger, and nags the right roommate so no human has to be the one who asks.</p>
+      </div>
+      <div class="cap">
+        <span class="quote">"when does the lease end?"</span>
+        <h3>Household memory</h3>
+        <p>A persistent context graph — landlord, allergies, wifi account, rent day — recalled automatically in every conversation.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="loops">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow mono">the flywheel</span>
+      <h2 class="serif">three loops, one machine that compounds.</h2>
+      <p>What you see in the demo — groceries — is one slice of the surface area. Underneath it, Kin is built as three self-reinforcing loops.</p>
+    </div>
+    <div class="loops-note"><b>note</b> the grocery flow is a small subset — the same loops run for bills, supplies, and services.</div>
+    <div class="loop-grid">
+      <div class="loop">
+        <span class="tag">growth loop</span>
+        <h3 class="serif">the product markets itself</h3>
+        <p>Kin manages groceries for thousands of households. Every six hours it looks across all of them, finds something genuinely interesting — <strong>egg prices up 40%, Trader Joe's cheaper than Instacart this week</strong> — and posts it to social media automatically. That post drives signups. New households generate more data. The content gets sharper. More signups. The loop runs itself.</p>
+      </div>
+      <div class="loop">
+        <span class="tag">product loop</span>
+        <h3 class="serif">every purchase teaches the next one</h3>
+        <p>Someone says "buy me celery." Kin price-sweeps every grocery option it knows. No clear winner? It asks the crowd on social, takes the best answer, buys it, and confirms before checkout. Then it writes everything back — <strong>this item, this store, this zip code, this price, this date</strong>. Next time anyone nearby asks for celery, Kin already knows where to go. The product improves itself with every request.</p>
+      </div>
+      <div class="loop">
+        <span class="tag">monetization loop</span>
+        <h3 class="serif">revenue scales with work done</h3>
+        <p>Every step in the product loop burns tokens — the price sweep, the social post, the crowd parsing, the database write. Users pay for tokens consumed, with a <strong>$20 floor</strong>. The more Kin does autonomously, the more revenue grows. Heavy users who want full autonomy naturally spend more without ever feeling nickeled and dimed — they're paying for work actually done.</p>
+      </div>
+    </div>
+    <div class="flywheel">
+      <div class="chain" aria-label="How the loops connect">
+        <b>growth brings households</b> <span class="arr">→</span>
+        <b>product serves them</b> <span class="arr">→</span>
+        <b>price intelligence grows</b> <span class="arr">→</span>
+        <b>content gets smarter</b> <span class="arr">→</span>
+        <b>more growth</b> <span class="arr">→</span>
+        <b>more tokens burned</b> <span class="arr">→</span>
+        <b>revenue scales</b> <span class="arr">↺</span>
+      </div>
+      <p>The asset in the middle — <strong>a price-intelligence database built from real purchases and real crowd responses</strong> — is what connects all three loops, and it's the one thing no competitor can copy. You can clone a chatbot. You can't clone thousands of households' worth of what-actually-sold-for-what.</p>
+    </div>
+  </div>
+</section>
+
+<section id="sponsors">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow mono">built on</span>
+      <h2 class="serif">the stack under the house.</h2>
+      <p>Every sponsor here is load-bearing — not a logo on a slide, but a system Kin calls in production on every message.</p>
+    </div>
+
+    <div class="sponsor-feature">
+      <span class="badge">core backend</span>
+      <h3 class="serif">InsForge</h3>
+      <p>
+        Kin's entire memory is InsForge. Every piece of durable state — <strong>roommates and balances, the shared
+        ledger, the grocery list, the household context graph, order jobs mid-flight, scheduled nags</strong> — lives
+        in InsForge Postgres, driven over its records API. Receipt photos upload to InsForge object storage and
+        come back as URLs pinned to ledger entries. And because InsForge is agent-native, the agent
+        <strong>provisioned its own backend at runtime</strong>: tables created remotely by the agent itself, no dashboard, no
+        migrations, no human in the loop. The price-intelligence database at the center of our flywheel — the moat —
+        <em>is</em> an InsForge database.
+      </p>
+      <ul class="sponsor-points">
+        <li><b>Postgres over REST</b>Members, ledger, groceries, facts, jobs, config — every read and write on every message.</li>
+        <li><b>Object storage</b>Receipt images land in an InsForge bucket and attach to expenses as living records.</li>
+        <li><b>Agent-provisioned</b>Kin created and evolves its own schema through the API — a backend built by its own user.</li>
+      </ul>
+    </div>
+
+    <div class="sponsor-grid">
+      <div class="sponsor">
+        <h3 class="serif">Nebius AI Studio</h3>
+        <div class="role">all inference</div>
+        <p>
+          Every token Kin thinks runs on Nebius — three open models in three distinct roles.
+          <strong>Qwen3-235B</strong> drives the hand-rolled function-calling loop, chaining up to ten tool rounds
+          per message. <strong>Qwen3-30B</strong> handles the fast paths: relevance classification and structured
+          extraction on every single group-chat message. <strong>Qwen2.5-VL-72B</strong> reads receipt photos
+          straight into ledger entries. One OpenAI-compatible endpoint, a custom sliding-window rate limiter,
+          zero closed-model dependency.
+        </p>
+      </div>
+      <div class="sponsor">
+        <h3 class="serif">Nimble</h3>
+        <div class="role">price intelligence</div>
+        <p>
+          Nimble is the eyes of the product loop. Every "buy me X" triggers a real-time structured price sweep
+          across <strong>Instacart, Safeway, Whole Foods, Trader Joe's, Costco, and Target</strong> via Nimble's
+          Web API, so Kin routes each order to the cheapest store. Nimble also computes week-over-week price
+          trends — the "egg prices up 40%" signals that seed the growth loop's social posts and get written back
+          into the price-intelligence database.
+        </p>
+      </div>
+      <div class="sponsor">
+        <h3 class="serif">Kylon</h3>
+        <div class="role">autonomous gtm</div>
+        <p>
+          The growth loop is a <strong>Kylon-powered marketing employee</strong>. On a schedule, Kin's GTM agent
+          pulls a Nimble price trend, drafts a post, files it into a Kylon workspace as a draft for approval, and
+          publishes to X through Kylon's tools API — the same draft→approve→publish discipline Kin applies to
+          money, applied to the brand. Marketing that runs while the team sleeps.
+        </p>
+      </div>
+      <div class="sponsor">
+        <h3 class="serif">You.com</h3>
+        <div class="role">grounded search</div>
+        <p>
+          When the house asks something the household graph can't answer — a vendor's hours, what a biller
+          charges, whether that plumber is legit — Kin grounds itself with <strong>You.com's Search and Research
+          APIs</strong>: fast web results for lookups, multi-source research for the deeper questions, cited and
+          current instead of hallucinated.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="fin">
+  <div class="wrap">
+    <span class="eyebrow mono">try it</span>
+    <h2 class="serif">the group chat is the app.</h2>
+    <p>No signup. No download. Text it like a roommate — because that's what it is.</p>
+    <a class="tg-btn" href="https://telegram.me/hearth1_bot" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+      text kin on telegram
+    </a>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-in">
+    <span class="serif">kin<span style="color:var(--ember)">.</span> — the household agent</span>
+    <span>
+      <a href="https://github.com/Ansh-Karnwal/kin" target="_blank" rel="noopener">github</a>
+      &nbsp;·&nbsp;
+      <a href="https://telegram.me/hearth1_bot" target="_blank" rel="noopener">@hearth1_bot</a>
+    </span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+  // Elements start visible (no-JS safe); the .reveal class is only added here.
+  const targets = document.querySelectorAll(
+    ".sec-head, .loops-note, .cap, .loop, .flywheel, .sponsor-feature, .sponsor, " +
+    ".sponsor-points li, .chain b, .chain .arr, .fin .eyebrow, .fin h2, .fin p, .fin .tg-btn"
+  );
+
+  // Stagger siblings: delay grows with the element's index among co-revealed siblings.
+  const groups = new Map();
+  targets.forEach((el) => {
+    const parent = el.parentElement;
+    const i = groups.get(parent) ?? 0;
+    groups.set(parent, i + 1);
+    el.classList.add("reveal");
+    el.style.setProperty("--d", Math.min(i * 90, 720) + "ms");
+  });
+
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) {
+        e.target.classList.add("in");
+        io.unobserve(e.target);
+      }
+    }
+  }, { rootMargin: "0px 0px -8% 0px", threshold: 0.1 });
+
+  targets.forEach((el) => io.observe(el));
+})();
+</script>
+
+</body>
+</html>
