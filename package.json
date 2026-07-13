@@ -1,0 +1,17 @@
+{
+  "name": "hearth",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/bridge",
+    "packages/agent"
+  ],
+  "scripts": {
+    "dev": "concurrently --names bridge,agent --prefix-colors blue,green \"npm run dev -w packages/bridge\" \"npm run dev -w packages/agent\"",
+    "build": "npm run build -w packages/bridge && npm run build -w packages/agent"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.0"
+  }
+}
