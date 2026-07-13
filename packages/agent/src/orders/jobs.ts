@@ -61,7 +61,13 @@ export async function applyOrderToLedger(
 
   const charges: Record<string, number> = {};
 
-  if (splitEvenly || job.note?.toLowerCase().includes("split evenly")) {
+  // Any mention of splitting means an even split across the house — "split it",
+  // "split between me and adithya", "split evenly" all land here. Per-requester
+  // attribution only applies when nobody asked to split.
+  const noteWantsSplit = /\bsplit\b/i.test(job.note ?? "");
+  const evenly = splitEvenly || noteWantsSplit;
+
+  if (evenly) {
     const perPerson = job.subtotal / members.length;
     for (const m of members) charges[m] = perPerson;
   } else {
@@ -113,6 +119,17 @@ export async function applyOrderToLedger(
     .join(", ");
 
   log("order.split_applied", { jobId: job.id, payer, subtotal: job.subtotal, breakdown });
+
+  if (evenly) {
+    const names = members.map((m) => m.toLowerCase());
+    const nameList =
+      names.length > 1
+        ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`
+        : names[0];
+    return `done — ${money(job.subtotal)} split evenly between ${nameList}, ${money(
+      job.subtotal / members.length
+    )} each. added to the tab.`;
+  }
   return `done — split: ${breakdown}. added to the tab.`;
 }
 

@@ -99,7 +99,7 @@ const functionDeclarations: FunctionDeclaration[] = [
   {
     name: "add_grocery_items",
     description:
-      "Add one or more items to the shared grocery list. Use when someone says they need something or are out of something.",
+      "Add one or more items to the shared grocery list. Use when someone says they need something or are out of something. When they ask to BUY or order something, call this first, then place_grocery_order in the same turn.",
     parameters: {
       type: "object",
       properties: {
@@ -131,7 +131,7 @@ const functionDeclarations: FunctionDeclaration[] = [
   {
     name: "place_grocery_order",
     description:
-      "Build the grocery list into a cart on Instacart, screenshot it, and send it to the house for approval before checking out. Use when someone says 'do the grocery run', 'order groceries', 'place the order'.",
+      "Build the grocery list into a cart on Instacart, screenshot it, and send it to the house for approval before checking out. Use when someone says 'do the grocery run', 'order groceries', 'place the order', or asks to buy/purchase something (after adding it to the list). Safe to call without asking — the house approves or cancels the cart via buttons before any money moves.",
     parameters: {
       type: "object",
       properties: {

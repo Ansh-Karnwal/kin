@@ -122,6 +122,8 @@ export interface ToolLoopOptions {
   systemInstruction: string;
   tools: any[]; // OpenAI tool format: { type: "function", function: {...} }
   message: string;
+  /** Prior turns of the group chat, oldest first. Lets "yes"/"the grocery list" make sense. */
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
   dispatch: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   /** Max rounds before giving up (default 10). */
   maxRounds?: number;
@@ -139,6 +141,7 @@ export async function runToolLoop(opts: ToolLoopOptions): Promise<string> {
   const messages: any[] = [
     // /no_think disables Qwen3's reasoning mode so tool calls go through the API correctly.
     { role: "system", content: `/no_think\n${opts.systemInstruction}` },
+    ...(opts.history ?? []),
     { role: "user", content: opts.message },
   ];
 

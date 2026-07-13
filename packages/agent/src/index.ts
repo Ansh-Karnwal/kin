@@ -118,6 +118,20 @@ app.post("/gtm/draft", async (req, res) => {
   }
 });
 
+// ── Conversation history ──────────────────────────────────────────────────────
+// The model gets recent turns so follow-ups ("yes", "the grocery list") land in
+// context. In-memory only — a restart forgetting the last few messages is fine.
+
+const HISTORY_LIMIT = 16;
+const chatHistory = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
+
+function remember(chatId: string, role: "user" | "assistant", content: string): void {
+  const h = chatHistory.get(chatId) ?? [];
+  h.push({ role, content });
+  if (h.length > HISTORY_LIMIT) h.splice(0, h.length - HISTORY_LIMIT);
+  chatHistory.set(chatId, h);
+}
+
 // ── /chat ─────────────────────────────────────────────────────────────────────
 
 interface ChatRequest {
@@ -146,26 +160,34 @@ app.post("/chat", async (req, res) => {
   const { sender, text, chatId, photoBase64 } = req.body;
   log("chat.inbound", { sender, chatId, text: text.slice(0, 80) });
 
+  // Record every inbound message (even ones we skip) and every reply we send,
+  // so the model sees the real thread when the next message arrives.
+  remember(chatId, "user", `${sender}: ${text}`);
+  const respond = (value: string | null): void => {
+    if (value) remember(chatId, "assistant", value);
+    res.json({ reply: value });
+  };
+
   try {
     const activeJob = await getActiveJobForChat(chatId);
 
     if (activeJob?.status === "awaiting_approval") {
       if (isCancellationMessage(text)) {
         await cancelOrder(activeJob.id, BRIDGE_PORT);
-        res.json({ reply: null });
+        respond(null);
         return;
       }
       if (isEditMessage(text)) {
         void editCart(activeJob.id, text, BRIDGE_PORT);
-        res.json({ reply: "on it — updating the cart" });
+        respond("on it — updating the cart");
         return;
       }
       if (isApprovalMessage(text)) {
         void approveAndCheckout(activeJob.id, sender, BRIDGE_PORT);
-        res.json({ reply: "placing the order now 🛒" });
+        respond("placing the order now 🛒");
         return;
       }
-      res.json({ reply: "still waiting on the cart approval — say 'yes' to place it, 'cancel' to stop, or tell me what to change" });
+      respond("still waiting on the cart approval — say 'yes' to place it, 'cancel' to stop, or tell me what to change");
       return;
     }
 
@@ -173,7 +195,7 @@ app.post("/chat", async (req, res) => {
       const code = extractOtpCode(text);
       if (code) {
         void submitOtp(activeJob.id, code, sender, BRIDGE_PORT);
-        res.json({ reply: "got it, submitting the code now..." });
+        respond("got it, submitting the code now...");
         return;
       }
     }
@@ -183,12 +205,12 @@ app.post("/chat", async (req, res) => {
     if (billJob?.status === "awaiting_approval") {
       if (isCancellationMessage(text)) {
         void cancelBillPay(billJob.id, BRIDGE_PORT);
-        res.json({ reply: null });
+        respond(null);
         return;
       }
       if (isApprovalMessage(text)) {
         void confirmBillPay(billJob.id, sender, BRIDGE_PORT);
-        res.json({ reply: "paying it now 💳" });
+        respond("paying it now 💳");
         return;
       }
     }
@@ -196,7 +218,7 @@ app.post("/chat", async (req, res) => {
       const code = extractOtpCode(text);
       if (code) {
         void submitBillPayOtp(billJob.id, code, sender, BRIDGE_PORT);
-        res.json({ reply: "got it, submitting the code now..." });
+        respond("got it, submitting the code now...");
         return;
       }
     }
@@ -204,9 +226,8 @@ app.post("/chat", async (req, res) => {
     const resolvedIds = await checkResolution(text, sender);
     if (resolvedIds.length > 0) {
       const resolved = await resolveItems(resolvedIds, sender);
-      const reply = buildResolutionAck(resolved);
       log("chat.outbound", { sender, type: "resolution", resolved: resolvedIds });
-      res.json({ reply });
+      respond(buildResolutionAck(resolved));
       return;
     }
 
@@ -218,7 +239,7 @@ app.post("/chat", async (req, res) => {
 
     if (!addressedToHearth && !classification.relevant) {
       log("chat.skipped", { sender, type: classification.type });
-      res.json({ reply: null });
+      respond(null);
       return;
     }
 
@@ -229,10 +250,14 @@ app.post("/chat", async (req, res) => {
     const stateBlock = await buildSerializedState();
     const dispatch = createDispatch({ sender, chatId, bridgePort: BRIDGE_PORT, photoBase64 });
 
+    // History excludes the current message — it's passed separately as the live turn.
+    const history = (chatHistory.get(chatId) ?? []).slice(0, -1);
+
     const reply = await runToolLoop({
       systemInstruction: buildChatSystemPrompt(stateBlock),
       tools: toolDeclarations,
       message: `${sender}: ${text}${photoContext}`,
+      history,
       dispatch,
     });
 
@@ -241,14 +266,10 @@ app.post("/chat", async (req, res) => {
 
     log("chat.outbound", { sender, type: classification.type, reply: reply.slice(0, 120) });
 
-    if (!reply || reply.trim() === "") {
-      res.json({ reply: null });
-    } else {
-      res.json({ reply });
-    }
+    respond(!reply || reply.trim() === "" ? null : reply);
   } catch (err) {
     log("chat.error", { sender, error: String(err) });
-    res.json({ reply: FALLBACK_REPLY });
+    respond(FALLBACK_REPLY);
   }
 });
 
