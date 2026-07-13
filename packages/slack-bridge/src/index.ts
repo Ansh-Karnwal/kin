@@ -1,19 +1,25 @@
 import "./env.js";
-import { getMe } from "./telegram.js";
+import { isConfigured, closeClient } from "./client.js";
 import { startListener, stopListener } from "./listener.js";
 import { startSender } from "./sender.js";
 import { log } from "./log.js";
 
-const me = await getMe();
-log("bridge.bot", { id: me.id, username: me.username, name: me.first_name });
+if (!isConfigured()) {
+  log("slack-bridge.disabled", {
+    reason:
+      "set SLACK_TEAM_ID and SLACK_JWT in .env (mint the JWT from the Photon dashboard), then restart",
+  });
+  process.exit(0);
+}
 
 const server = startSender();
-await startListener();
+startListener();
 
 async function shutdown(signal: string): Promise<void> {
-  log("bridge.shutdown", { signal });
-  stopListener();
+  log("slack-bridge.shutdown", { signal });
+  await stopListener();
   server.close();
+  await closeClient();
   process.exit(0);
 }
 

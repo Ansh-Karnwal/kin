@@ -3,4 +3,10 @@ dist/
 .env
 *.db
 packages/bridge/.last-seen
+packages/bridge/.tg-offset
 packages/bridge/handles.json
+packages/slack-bridge/.cursor
+packages/slack-bridge/slack-handles.json
+
+# Stray nested project — not part of this repo.
+hearth/

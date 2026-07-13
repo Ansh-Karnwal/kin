@@ -1,9 +1,10 @@
 import express from "express";
 import type { Server } from "node:http";
-import { sendMessage } from "./telegram.js";
+import { text } from "@photon-ai/slack";
+import { getTeam, isConfigured } from "./client.js";
 import { log } from "./log.js";
 
-const PORT = Number(process.env.BRIDGE_PORT) || 3001;
+const PORT = Number(process.env.SLACK_BRIDGE_PORT) || 3002;
 
 interface SendBody {
   chatId: string;
@@ -26,9 +27,10 @@ export function startSender(): Server {
   app.use(express.json());
 
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", service: "hearth-bridge" });
+    res.json({ status: "ok", service: "hearth-slack-bridge", configured: isConfigured() });
   });
 
+  // Same contract as the iMessage bridge: chatId is the Slack channel id.
   app.post("/send", async (req, res) => {
     if (!isSendBody(req.body)) {
       res.status(400).json({ error: "expected { chatId: string, message: string }" });
@@ -36,11 +38,11 @@ export function startSender(): Server {
     }
     const { chatId, message } = req.body;
     try {
-      await sendMessage(chatId, message);
-      log("send.outbound", { chatId, message });
+      await getTeam().messages.send({ channel: chatId, ...text(message) });
+      log("send.outbound", { channel: chatId, message });
       res.json({ ok: true });
     } catch (err) {
-      log("send.failed", { chatId, error: String(err) });
+      log("send.failed", { channel: chatId, error: String(err) });
       res.status(502).json({ ok: false, error: String(err) });
     }
   });

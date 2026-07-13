@@ -3,7 +3,7 @@ import path from "node:path";
 import { BRIDGE_ROOT } from "./env.js";
 import { log } from "./log.js";
 
-/** Maps iMessage handles (phone/email) to roommate names, e.g. "+15551234567" → "Jake". */
+/** Maps Telegram user ids to roommate names, e.g. "123456789" → "Jake". */
 export type HandleMap = Record<string, string>;
 
 export const HANDLES_PATH = path.join(BRIDGE_ROOT, "handles.json");
@@ -33,16 +33,15 @@ export function saveHandles(map: HandleMap): void {
 }
 
 /**
- * Resolve a raw iMessage handle to a roommate name, falling back to the
- * handle itself. From-me rows have no participant — the host account's owner
- * is mapped via the reserved "me" key in handles.json.
+ * Resolve a Telegram user id to a roommate name. Prefer an explicit mapping
+ * from handles.json; otherwise fall back to the sender's Telegram first name,
+ * and finally the raw id. The fallback means people are recognizable even
+ * before they're labeled in setup.
  */
 export function resolveSender(
   handles: HandleMap,
-  participant: string | null,
-  isFromMe: boolean
+  userId: string,
+  firstName?: string
 ): string {
-  if (isFromMe) return handles["me"] ?? "me";
-  if (!participant) return "unknown";
-  return handles[participant] ?? participant;
+  return handles[userId] ?? firstName ?? userId;
 }

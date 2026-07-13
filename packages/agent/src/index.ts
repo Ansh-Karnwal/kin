@@ -26,6 +26,10 @@ import {
 const PORT = Number(process.env.AGENT_PORT) || 3000;
 const BRIDGE_PORT = Number(process.env.BRIDGE_PORT) || 3001;
 const TARGET_CHAT = process.env.TARGET_CHAT_GUID ?? "";
+// Nags can be routed to any bridge that speaks POST /send { chatId, message } —
+// defaults preserve the original iMessage wiring.
+const NAG_BRIDGE_PORT = Number(process.env.NAG_BRIDGE_PORT) || BRIDGE_PORT;
+const NAG_CHAT_ID = process.env.NAG_CHAT_ID || TARGET_CHAT;
 
 const FALLBACK_REPLY = "something went wrong on my end, try again?";
 
@@ -201,15 +205,15 @@ async function dispatchNags(): Promise<void> {
 
   log("nag.triggered", { count: nags.length });
 
-  const chatId = TARGET_CHAT;
+  const chatId = NAG_CHAT_ID;
   if (!chatId) {
-    log("nag.skipped", { reason: "TARGET_CHAT_GUID not set" });
+    log("nag.skipped", { reason: "NAG_CHAT_ID / TARGET_CHAT_GUID not set" });
     return;
   }
 
   for (const nag of nags) {
     try {
-      await fetch(`http://localhost:${BRIDGE_PORT}/send`, {
+      await fetch(`http://localhost:${NAG_BRIDGE_PORT}/send`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chatId, message: nag.message }),
